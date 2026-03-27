@@ -13,19 +13,40 @@ import openml
 import base64
 import json
 from langchain_core.messages import HumanMessage
+
 import time
 from tqdm import tqdm
 import uuid
+import re
+
+from pathlib import Path
 
 from sklearn.datasets import fetch_openml
 
+import argparse
+
 OPENML_LIST_URL = "https://www.openml.org/api/v1/json/data"
-rng = np.random.default_rng(67)
+
 
 llm = ChatOpenAI(
-    model="qwen3vl",   # name doesn't matter much; vLLM lists it via /v1/models
+    model="qwen3.5",   
     openai_api_key="EMPTY",  # required but ignored by vLLM
-    openai_api_base="http://localhost:8000/v1"
+    openai_api_base="http://ixb:8000/v1",
+    extra_body= {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+)
+
+llm_think = ChatOpenAI(
+    model="qwen3.5",  
+    openai_api_key="EMPTY",
+    openai_api_base="http://ixb:8000/v1",
+    extra_body= {
+        "chat_template_kwargs": {"enable_thinking": True},
+        "logit_bias": {
+            "248069": 5.0,   # make </think> more likely
+        }
+    }
 )
 
 # DATASET HELPPERS ----------------------------------------------------------------
@@ -171,8 +192,15 @@ def get_random_ds(d_meta, rng):
 # LLM CALLS ---------------------------------------------------------------------------------------------------
 
 def after_think(text: str) -> str:
-    return text.split("</think>", 1)[1] if "<think>" in text else text
+    athink = text.split("</think>", 1)[1] if "<think>" in text else text
+    think = text.split("</think>", 1)[0] if "<think>" in text else None
+    return think, athink
 
+def _strip_code_fences(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"^```(?:json|python)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    return s.strip()
 
 def determine_dataset_call(metadata) -> dict:
     prompt = (
@@ -189,13 +217,15 @@ def determine_dataset_call(metadata) -> dict:
     )
 
     out = llm.invoke(prompt).content
-    out = after_think(out)
+    _, out = after_think(out)
     
     desc = json.loads(out.replace("```json", "").replace("```", ""))
 
     return desc
 
 def graphs_call(features: dict, dataset_description: str) -> dict:
+    creat = np.random.beta(2, 4, size=1)[0]
+
     prompt = (
         "You are a data visualization expert.\n"
         "You receive the head of a dataset in JSON format along with feature metadata.\n\n"
@@ -207,11 +237,13 @@ def graphs_call(features: dict, dataset_description: str) -> dict:
         "- Include BOTH basic plots AND more advanced or complex plots\n"
         "- The plots should be similar to what human scientists would create for the given dataset and it's description, not just random plots.\n"
         "- You are encouraged to be creative with the plot types.\n"
+        "- Examples (you are NOT limited to this) of creative plot types Circos plot, Sankey diagram, Chord diagram, Sunburst chart, Treemap, Radar chart, Streamgraph, Parallel coordinates plot, Network graph, Heatmap, Violin plot, Ridgeline plot, Hexbin plot, Contour plot, Bubble chart, Alluvial diagram, Marimekko chart, Waterfall chart, Funnel chart, Polar area chart, Nightingale rose chart, Voronoi diagram, Dendrogram, Icicle chart, Bump chart, Lollipop chart, Dot matrix chart, Packed bubble chart, Arc diagram, Gantt chart"
         "- You should sometimes include multiple subplots or faceted plots to show more complex relationships or compare different classes (e.g 2 subplots layered horizontally or vertically.)\n"
         "- Do NOT include plots that would be extremely hard to read and don't make sense semantically (e.g., a bar plot with many tiny bars, a line plot of very scattered data, etc.)\n"
         "- Do NOT repeat plot types.\n"
         "- Do NOT generate code.\n"
         "- Do NOT describe the plots.\n\n"
+        "- DO NOT propose plots with many different subplots. It should contain a maximum of 5 subplots per row and 5 per column."
         "Output format (STRICT):\n"
         "- Return ONLY a valid JSON array.\n"
         "- Each element must be a JSON object with EXACTLY these keys:\n"
@@ -221,84 +253,171 @@ def graphs_call(features: dict, dataset_description: str) -> dict:
         "- The listed features must exist in the provided FEATURES section.\n"
         "- Use all feature names EXACTLY as given.\n"
         "- No additional keys, comments, or text.\n\n"
-        "- Consider that the person graphing can only use numpy, pandas, matplotlib, scikit-learn, and default python libraries, nothing else"
+        "- Consider that the person graphing can only use numpy, pandas, matplotlib, scikit-learn, and default python libraries, nothing else."
+        f"You are given a creativity level: {creat:.02f} on a scale from 0 to 1.\n"
+        "Interpret this as:\n"
+        "- 0.0 = choose the most standard and safest graph type\n"
+        "- 0.5 = allow moderately uncommon but still clear graph choices\n"
+        "- 1.0 = prefer more novel but still valid and interpretable graph choices\n\n"
         f"FEATURES:\n{json.dumps(features, ensure_ascii=False)}\n"
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    out = llm.invoke(prompt).content
-    out = after_think(out)
+    out = llm_think.invoke(prompt).content
+    _, out = after_think(out)
     out = out[out.find("["): out.rfind("]") + 1]
     
     spec = json.loads(out)
 
     return spec
 
-def graph_call(features, selected_plot, head) -> dict:
+def replace_vars_call(features: dict, dataset_description: str):
     prompt = (
-        "You are a plot rendering agent.\n"
-        "You are given:\n"
-        "1) A pandas DataFrame named `df`.\n"
-        "2) A JSON object named `selected_plot` that was produced by a previous model call.\n\n"
-        "selected_plot has exactly these keys:\n"
-        "  - \"type\": the required plot type to render\n"
-        "  - \"features\": the exact list of column names that must be used for the plot\n"
-        "  - \"style\": the matplotlib style to use for rendering\n\n"
-        "Your job:\n"
-        "- Render EXACTLY ONE plot whose plot type matches selected_plot[\"type\"].\n"
-        f"- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path'\n"
-        "- Use ONLY the columns listed in selected_plot[\"features\"].\n"
-        "- You may derive temporary helper columns ONLY from those listed features "
-        "(e.g., binning a numeric feature, extracting month from a datetime feature), "
-        "but you must not use any other df columns.\n"
-        "- You may replace feature names in titles or labels with clearer semantic equivalents when their meaning can be reliably inferred.\n\n"
-        "- If there are outliers that would worsen the quality of the graph you can remove them."
-        "Libraries:\n"
-        "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. Do NOT use pandas plotting options always use matplotlib directly.\n\n"
-        "CRITICAL: After the code runs, define BOTH:\n"
-        "1) A pandas DataFrame named `graph_df` containing the FINAL PROCESSED DATA actually used for plotting\n"
-        "   (after all filtering, aggregation, binning, and transformations).\n"
-        "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
-        "graph_data = {\n"
-        "  \"plot_type\": string,                     # must equal selected_plot[\"type\"]\n"
-        "  \"features_expected\": list[str],          # must equal selected_plot[\"features\"] exactly\n"
-        "  \"features_used\": list[str],              # columns actually used (include derived names if created)\n"
-        "  \"derived_features\": list[str],           # names of any derived helper columns you create\n"
-        "  \"x\": string or null or array of values if multiple subplots,\n"
-        "  \"y\": string or null or array of values if multiple subplots,\n"
-        "  \"hue\": string or null or array of values if multiple subplots,\n"
-        "  \"facet\": string or null\n"
-        "  \"aggregation\": string or null or array of values if multiple subplots,\n"
-        "  \"binning\": string or null or array of values if multiple subplots,\n"
-        "  \"transformations\": list[str] or array of values if multiple subplots,\n"
-        "  \"filters\": list[str],\n"
-        "  \"n_rows_input\": int\n"
-        "  \"n_rows_plotted\": int,                   # MUST equal len(graph_df)\n"
-        "  \"title\": string\n"
-        "}\n\n"
-        "Validation rules:\n"
-        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
-        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows or columns).\n"
-        "- If any feature in selected_plot[\"features\"] is missing from df.columns, pick a different plot approach "
-        "that still matches selected_plot[\"type\"] but uses the remaining provided features only; "
-        "ALWAYS keep graph_data[\"features_expected\"] unchanged.\n"
-        "- Do NOT change selected_plot[\"type\"].\n"
-        "- Do NOT use columns outside selected_plot[\"features\"].\n"
-        "- Do NOT print anything.\n"
-        "- Output ONLY MINIMAL executable Python code.\n\n"
-        "- You should be careful to properly space elements in graphs to avoid overlap and improve readability.\n"
-        "- For radablility purposes you NEED TO make the figures large enough to fit all the elements in the plots.\n"
-        "- The use of plt.tight_layout() is encouraged to improve spacing. You should make figures that have multiple subplots bigger so they are readable.\n"
-        "Inputs you must rely on:\n"
+        "You are a data expert specializing in dataset interpretation.\n\n"
+        "Your task is to rename feature names so they are more semantically meaningful"
+        "based ONLY on the dataset description provided.\n\n"
+        "Feature names should be renamed so they make sense if they are presented without dataset description or as a label of an axis on a graph."
+        "Rules:\n"
+        "1. Do NOT add or remove any features.\n"
+        "2. The number of returned feature names MUST exactly match the number of input features.\n"
+        "3. Keep the original order.\n"
+        "4. If you cannot confidently infer a better semantic name, return the original name unchanged.\n"
+        "5. Return ONLY a valid array of strings.\n\n"
+        f"INPUT FEATURES:\n{json.dumps(features, ensure_ascii=False)}\n\n"
+        f"DATASET DESCRIPTION:\n{dataset_description}\n"
+    )
+
+    out = llm.invoke(prompt).content
+    _, out = after_think(out)
+    
+    desc = json.loads(out.replace("```json", "").replace("```", ""))
+
+    return desc
+
+def compute_info_call(features, selected_plot, head):
+    prompt = (
+        "You are a senior data visualization expert.\n"
+        "You receive information about:\n"
+        "- A graph type\n"
+        "- The graph name\n"
+        "- The dataset feature names\n"
+        "- The dataset feature types (numerical, categorical, ordinal, binary, datetime, etc.)\n\n"
+        "Your task:\n"
+        "- Provide clear and practical instructions for a coding agent that will generate this plot.\n"
+        "- Focus ONLY on what the coding agent must watch out for to ensure the plot is readable, correct, and visually meaningful.\n"
+        "- Do NOT write code.\n"
+        "- Do NOT explain theory.\n"
+        "- Do NOT restate the inputs.\n\n"
+        "The instructions should include considerations such as:\n"
+        "- Axis selection and scaling\n"
+        "- Handling categorical vs numerical features\n"
+        "- Label clarity and rotation if needed\n"
+        "- Dealing with skewed distributions\n"
+        "- Overplotting and transparency\n"
+        "- Sorting categories when appropriate\n"
+        "- Aggregation requirements (if necessary)\n"
+        "- Log-scaling if appropriate\n"
+        "- Color usage and legend clarity\n"
+        "- Handling missing values\n"
+        "- Ensuring the title reflects the actual data mapping\n\n"
+        "Be concise but thorough.\n"
+        "Return ONLY a structured bullet-point list of actionable instructions. Also keep it very brief.\n\n"
+        f"INPUT:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n"
         f"HEAD:\n {json.dumps(head)}"
     )
+
     out = llm.invoke(prompt).content
-    out = after_think(out)
+    _, out = after_think(out)
 
-    code = out.replace("```python", "").replace("```", "")
+    return out
 
+def graph_call(features, selected_plot, head) -> str:
+    plan_prompt = (
+        "You are a plotting planner.\n"
+        "You will be given:\n"
+        "- selected_plot (type, required features list, matplotlib style)\n"
+        "- FEATURES_METADATA (column types/semantics)\n"
+        "- HEAD (first rows)\n\n"
+        "Output ONLY a single JSON object (no code, no extra text).\n"
+        "JSON schema (all keys required):\n"
+        "{\n"
+        "  \"notes\": string"
+        "}\n\n"
+        "Rules:\n"
+        "- Give the plotting agent some notes about how to proceed with the writing of the code and what to watch out for."
+        "- Keep notes concise but not too short. (100-150 words)\n\n"
+        f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
+        f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
+        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n"
+    )
+
+    plan_raw = llm.invoke(plan_prompt).content
+    _, plan_raw = after_think(plan_raw)
+    plan = _strip_code_fences(plan_raw)
+
+    code_prompt = (
+        "You are a plot rendering agent.\n"
+        "You are given:\n"
+        "1) A pandas DataFrame named `df`.\n"
+        "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
+        "selected_plot has exactly these keys:\n"
+        "  - \"type\": the required plot type to render\n"
+        "  - \"features\": the exact list of column names that must be used for the plot\n"
+        "Your job:\n"
+        "- Render EXACTLY ONE plot whose plot type matches selected_plot[\"type\"].\n"
+        "- Follow `plan` for x/y/hue/facet/aggregation/binning/filters/figsize/title.\n"
+        "- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path', use this variable but don't change it.\n"
+        "- Use ONLY the columns listed in selected_plot[\"features\"].\n"
+        "- You may derive temporary helper columns ONLY from those listed features.\n\n"
+        "Libraries:\n"
+        "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. Do NOT use seaborn!\n"
+        "- Do NOT use pandas plotting; always use matplotlib directly.\n\n"
+        "CRITICAL: After the code runs, define BOTH:\n"
+        "1) A pandas DataFrame named `graph_df` containing the FINAL PROCESSED DATA actually used for plotting.\n"
+        "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
+        "graph_data = {\n"
+        "  \"plot_type\": string,\n"
+        "  \"features_expected\": list[str],\n"
+        "  \"features_used\": list[str],\n"
+        "  \"derived_features\": list[str],\n"
+        "  \"x\": string or null or array of values if multiple subplots,\n"
+        "  \"y\": string or null or array of values if multiple subplots,\n"
+        "  \"hue\": string or null or array of values if multiple subplots,\n"
+        "  \"facet\": string or null,\n"
+        "  \"aggregation\": string or null or array of values if multiple subplots,\n"
+        "  \"binning\": string or null or array of values if multiple subplots,\n"
+        "  \"transformations\": list[str] or array of values if multiple subplots,\n"
+        "  \"filters\": list[str],\n"
+        "  \"n_rows_input\": int,\n"
+        "  \"n_rows_plotted\": int,\n"
+        "  \"title\": string\n"
+        "}\n\n"
+        "Validation rules:\n"
+        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
+        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
+        "- If any feature in selected_plot[\"features\"] is missing from df.columns, pick a different plot approach\n"
+        "  that still matches selected_plot[\"type\"] but uses the remaining provided features only;\n"
+        "  ALWAYS keep graph_data[\"features_expected\"] unchanged.\n"
+        "- Do NOT change selected_plot[\"type\"].\n"
+        "- Do NOT use columns outside selected_plot[\"features\"].\n"
+        "- Do NOT print anything.\n"
+        "- Output ONLY MINIMAL executable Python code.\n"
+        "- Use large enough figures; use plt.tight_layout().\n\n"
+        "Inputs you must rely on:\n"
+        f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
+        f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
+        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
+    )
+
+    out = llm_think.invoke(code_prompt).content
+    try:
+        _, out = after_think(out)
+    except Exception:
+        pass
+
+    code = _strip_code_fences(out)
     return code
 
 def check_call(image_path: str, plot_code: str) -> str:
@@ -312,7 +431,7 @@ def check_call(image_path: str, plot_code: str) -> str:
         "Goal:\n"
         "Provide practical feedback on readability and distinguishability. Be helpful, not overly strict.\n"
         "Focus on whether someone can interpret the plot correctly at a glance.\n"
-        "Be very careful with your feedback as wrong feedback can severey impact goodness of graphs. If there are no sever mistakes just set the correction key to false"
+        "Be very careful with your feedback as wrong feedback can severey impact goodness of graphs. If there are no severe mistakes just set the correction key to false"
         "\n"
         "What to check (prioritize):\n"
         "- Visibility: text size, tick labels, title, axis labels, legend readability.\n"
@@ -321,16 +440,18 @@ def check_call(image_path: str, plot_code: str) -> str:
         "- Scaling/layout: axes limits, aspect ratio, too much empty space, cut-off labels, rotated ticks.\n"
         "- Data-ink issues: overplotting, too many categories, need aggregation/binning/faceting.\n"
         "- Accessibility basics: ensure contrast is adequate and the plot doesn’t rely on subtle differences only.\n"
+        "IMPORTANT: Do NOT propose a change if it doesn't heavily impact readability. Suggesting changes that would result in only minor improvements is NOT allowed.\n"
         "\n"
         "Output requirements (STRICT):\n"
-        "- Output a JSON with keys:\n"
+        "- Output only a valid JSON with keys:\n"
         "  - feedback: the feedback of the graph, this is strictly only a string.\n"
-        "  - correction: true or false based on whether you think the mistakes in the graph are large enough to warrant re-generation of the plot\n"
+        "  - correction: true or false based on whether you think the mistakes in the graph are large enough to warrant re-generation of the plot. If graph cannot be improved without changing its type then set to false.\n"
         "- Keep it very concise, return only faults of the graph and no positive feedback or explanations.\n"
         "- Each bullet MUST include:\n"
         "  (a) the issue (if any),\n"
         "  (b) a concrete fix in text\n"
-        "- Do NOT nitpick minor stylistic preferences.\n"
+        "- You should output the negative feedback even if it's not severe enough to warrant re-generation."
+        "- Do NOT nitpick minor stylistic preferences. \n"
         "- Do NOT propose changing the plot type.\n"
     )
 
@@ -348,10 +469,10 @@ def check_call(image_path: str, plot_code: str) -> str:
     )
 
     # Invoke the LLM
-    resp = llm.invoke([msg])
+    resp = llm_think.invoke([msg])
 
     out = resp.content
-    out = after_think(out)
+    _, out = after_think(out)
 
     feedback = json.loads(out.replace("```json", "").replace("```", ""))
 
@@ -363,8 +484,6 @@ def recode_call(features, selected_plot, previous_code, corrections, head) -> di
         "You are given:\n"
         "1) A pandas DataFrame named `df`.\n"
         "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
-        "3) OPTIONAL: `previous_code` (the code used previously).\n"
-        "4) OPTIONAL: `corrections` (feedback describing what to fix).\n\n"
         "selected_plot has exactly these keys:\n"
         "  - \"type\": the required plot type to render\n"
         "  - \"features\": the exact list of column names that must be used for the plot\n"
@@ -418,12 +537,12 @@ def recode_call(features, selected_plot, previous_code, corrections, head) -> di
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
         f"HEAD:\n {json.dumps(head)}\n\n"
-        f"previous_code = {json.dumps(previous_code or '', ensure_ascii=False)}\n\n"
-        f"corrections = {json.dumps(corrections or '', ensure_ascii=False)}\n"
+        f"previous_code: {json.dumps(previous_code or '', ensure_ascii=False)}\n\n"
+        f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
 
     out = llm.invoke(prompt).content
-    out = after_think(out)
+    _, out = after_think(out)
 
     code = out.replace("```python", "").replace("```", "")
 
@@ -447,6 +566,7 @@ def describe_graph_png(png_path, plot_code, graph_data, graph_df, dataset_desc, 
         "If something cannot be confidently inferred, explicitly say it is unknown or not determinable.\n"
         "You do NOT have to mention where each fact comes from, but you must NOT invent any details.\n"
         "Do NOT guess.\n"
+        "While the description should be detailed it should not be over around 2500 words.\n"
         "\n"
         "Output rules:\n"
         "- Output ONLY plain text.\n"
@@ -517,8 +637,11 @@ def describe_graph_png(png_path, plot_code, graph_data, graph_df, dataset_desc, 
         ]
     )
 
-    resp = llm.invoke([msg])
-    return resp.content
+    resp = llm_think.invoke([msg]).content
+
+    _, out = after_think(resp)
+
+    return out
 
 def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, graph_data: dict) -> list[dict]:
     qa_prompt = (
@@ -533,9 +656,9 @@ def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, g
         "Task:\n"
         "Generate EXACTLY 20 questions about the chart.\n"
         "Include a mix of difficulties:\n"
-        "- 8 easy (direct reading: titles, axes, legend, counts, obvious comparisons)\n"
-        "- 8 medium (interpretation: comparisons across groups, trends, approximate ranges, notable patterns)\n"
-        "- 4 hard (multi-step reasoning grounded in the chart + context, but still definitively answerable)\n"
+        "- 7 easy (direct reading: titles, axes, legend, counts, obvious comparisons)\n"
+        "- 6 medium (interpretation: comparisons across groups, trends, approximate ranges, notable patterns)\n"
+        "- 7 hard (multi-step reasoning grounded in the chart + context, but still definitively answerable, these questions should be questions that experts would ask when looking at the chart.)\n"
         "\n"
         "CRITICAL CONSTRAINTS:\n"
         "- Every question MUST be definitively answerable from the provided IMAGE and/or the provided chart/dataset descriptions.\n"
@@ -544,6 +667,7 @@ def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, g
         "- Do NOT produce questions that are just instructions like 'analyze' or 'explain how'.\n"
         "- Avoid vague questions. Each must have a single, checkable answer.\n"
         "- If exact numeric values are not available, ask questions that accept approximate answers only when the chart clearly supports approximation.\n"
+        "- While you can help yourself with the description to answer a question more accurately, do NOT ask questions about something that can't be answered ONLY from the image."
         "\n"
         "Output format (STRICT):\n"
         "Return ONLY valid JSON: an array of exactly 20 objects.\n"
@@ -551,7 +675,7 @@ def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, g
         "{\n"
         "  \"question\": string,\n"
         "  \"answer\": string,             # must be concrete, not instructions\n"
-        "  \"answer_basis\": \"image\"|\"description\"|\"both\"  # where the answer comes from\n"
+        "  \"answer_basis\": \"image\"|\"both\"  # where the answer comes from\n"
         "}\n"
         "\n"
         "Quality requirements:\n"
@@ -559,7 +683,8 @@ def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, g
         "  (a) chart mechanics/visual properties (axes, legend, encodings, layout), and\n"
         "  (b) semantics in dataset context (what variables represent, what patterns mean).\n"
         "- Do not repeat the same question pattern; vary them.\n"
-        "- Questions should be related to the graph and the data in the graph, do not ask general questions about the dataset that do not directly relate to the chart.\n"
+        "- Questions should be related to the graph and the data in the graph, do NOT ask general questions about the dataset that do not directly relate to the chart.\n"
+        "- Do NOT ask questions like how many rows are in the data or how many rows were left out, unless that is specified on the image itself.\n"
         "- Do NOT include any extra text outside the JSON.\n"
     )
 
@@ -575,29 +700,87 @@ def generate_graph_questions(png_path: str, dataset_desc: str, plot_desc: str, g
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
     ])
 
-    resp = llm.invoke([msg]).content
+    resp = llm_think.invoke([msg]).content
+
+    _, out = after_think(resp)
 
     start = resp.find("[")
     end = resp.rfind("]")
-    return json.loads(resp[start:end+1])
+    return json.loads(out[start:end+1])
 
-
-if __name__ == "__main__": 
-    print("Start generation...")
-
-    DATASET_FOLDER = "dataset"
-    IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
-    GENERATE_DS_IMAGES = 10
-    FEEDBACK = False
-
-    n_files = sum(
-        1 for f in os.listdir(IMAGES_FOLDER)
-        if os.path.isfile(os.path.join(IMAGES_FOLDER, f))
+def give_question_types(questions):
+    prompt = (
+        "You are a question categorizer.\n"
+        "YOu will be given questions and you have to assing types to them.\n"
+        "You can assign questions only these labels:\n"
+        "  - 'metadata': The question asks for chart text or styling directly visible in the image, such as the title, axis labels, legend entries, colors, units, or tick values.\n"
+        "  - 'value extraction': The question asks for the value of a specific plotted element or local visual quantity, such as a bar height, point value, coordinate, count, or frequency.\n"
+        "  - 'comparison': The question asks to compare two or more visual elements, categories, series, or values.\n"
+        "  - 'trends': The question asks about the overall pattern, structure, or distribution in the plot, such as increase/decrease, skewness, clustering, gaps, outliers, seasonality, or general shape.\n"
+        "  - 'reasoning': The question requires combining visual evidence from the image with arithmetic, dataset context, or external information to infer the answer. Overall requires a more complex reasoning process.\n\n"
+        "Rules:"
+        "   - Respond only with a valid array of string values from the previous list.\n"
+        "   - You may NOT add or remove questions.\n"
+        "   - You must give each question EXACTLY ONE label.\n\n"
+        "Questions:\n"
+        f"{json.dumps(questions, indent=2)}"
+    
     )
 
-    datasets_meta = openml_list_uci()
+    out = llm.invoke(prompt).content
+    _, out = after_think(out)
 
+    out = json.loads(out.replace("```json", "").replace("```", ""))
+
+    return out
+
+if __name__ == "__main__": 
+    job_id = int(os.getenv("SLURM_JOB_ID", 1))
+    pid = os.getpid()
+    
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--metadata-file", type=str, required=False, default="metadata.jsonl")
+    parser.add_argument("--start-index",  type=int, required=False, default=0)
+    parser.add_argument("--datasets", type=int, required=False, default=10)
+    parser.add_argument("--feedback", action="store_true", default=True)
+    parser.add_argument("--seed", type=int, required=False, default=((job_id * pid) % 60000))
+    parser.add_argument("--run-id", type=int, required=True, default=0)
+
+    args = parser.parse_args()
+
+    print(job_id, pid, args.run_id)
+
+    job_id = f"{job_id}_{args.run_id}"
+
+    print(f"JOB ID: {job_id}")
+
+    args.metadata_file = f"metadata{job_id}.jsonl"
+
+    MAIN_DIR = Path(__file__).resolve().parent
+
+    DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
+    IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
+    GENERATE_DS_IMAGES = args.datasets
+    FEEDBACK = args.feedback
+
+    if args.start_index == -1:
+        n_files = sum(
+            1 for f in os.listdir(IMAGES_FOLDER)
+            if os.path.isfile(os.path.join(IMAGES_FOLDER, f))
+        )
+    else:
+        n_files = args.start_index
+
+    rng = np.random.default_rng(args.seed)
+
+    datasets_meta = openml_list_uci()
+   
     index = n_files
+
+
+    print("Start generation...")
 
     """ pbar = tqdm(total=GENERATE_DS_IMAGES*10)
     pbar.update(0) """
@@ -609,6 +792,10 @@ if __name__ == "__main__":
                 ds_id, df = get_random_ds(datasets_meta, rng) # Fetch random UCI dataset
                 dataset_sem = get_dataset_semantics(ds_id, sleep_s=1.0) # Get dataset semantics
 
+                if dataset_sem.get("features") == None:
+                    dataset_sem["features"] = ""
+
+                print("Getting usability...")
                 desc_dataset = determine_dataset_call(dataset_sem) # Determine if dataset is useful and format description
 
                 if not desc_dataset["useful"]:
@@ -623,10 +810,28 @@ if __name__ == "__main__":
 
         head_json = df.head(5).to_dict(orient="records")
 
+        print("Replacing variables...")
+
+        new_names = replace_vars_call(dataset_sem.get("features"), dataset_sem["description"])
+
+        try:
+            old_names = list(df.columns)
+            df.columns = new_names
+
+            for old, new in zip(old_names, new_names):
+                dataset_sem["description"] = dataset_sem["description"].replace(old, new)
+                dataset_sem["features"] = json.loads(json.dumps(dataset_sem["features"]).replace(old, new))
+            
+
+        except Exception as e:
+            print(f"Couldn't replace variable names... {e}")
+
+        head_json = df.head(5).to_dict(orient="records")
+
         # Generate GRAPH TYPES
         print(f"Generating graph types for dataset {ds_id}...")
         retr = 0
-        while True:
+        while retr < 3:
             try:
                 graph_types = graphs_call(json.dumps(head_json), dataset_sem["description"])
 
@@ -641,21 +846,29 @@ if __name__ == "__main__":
                 print(f"Error generating graph types, retrying ({retr}) with dataset {ds_id}... {e}")
                 continue
 
+        if retr >= 3:
+            continue
+
         # Generate and RENDER GRAPHS
         i = 0
         rerun = 0
         while i < len(graph_types):
+            time_start = time.perf_counter()
+
             if rerun > 2:
                 rerun = 0
                 i += 1
                 continue
             matplotlib.rcParams.update(matplotlib.rcParamsDefault)
             plt.style.use("default")
-            print(f"Generating graph {i+1}/{len(graph_types)} for dataset {ds_id}...")
-            graph_file_path = f"dataset/images/{index}_it0.png"
+            print(f"Generating graph {i+1}/{len(graph_types)} for dataset {ds_id}..., image id: {job_id}_{index}")
+            graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it0.png")
             selected_plot = graph_types[i]
             try:
                 imgs = []
+                #instruct = compute_info_call(dataset_sem.get("features"), graph_types[i], json.dumps(head_json))
+
+                plt.style.use(selected_plot["style"])
                 code = graph_call(dataset_sem.get("features"), graph_types[i], json.dumps(head_json))
 
                 exec_ns = {
@@ -663,7 +876,7 @@ if __name__ == "__main__":
                     "selected_plot": selected_plot,
                     "graph_file_path": graph_file_path,
                     "__builtins__": __builtins__,
-                }
+                }   
 
                 exec(code, exec_ns, exec_ns)
 
@@ -674,20 +887,25 @@ if __name__ == "__main__":
                 
                 if FEEDBACK:
                     regen_count = 0
+                    img_count = 0
                     while True:
                         try:
-                            feedback = check_call(graph_file_path, code)
+                            try:
+                                feedback = check_call(graph_file_path, code)
+                            except:
+                                print("Couldn't find image")
+                                break
 
                             imgs.append({ 
-                                "path": graph_file_path, 
+                                "path": os.path.relpath(graph_file_path, DATASET_FOLDER), 
                                 "feedback": feedback["feedback"], 
                                 "code": code
                             })
 
                             if feedback["correction"] and regen_count < 3:
-                                print(f"Graph {i+1} needs correction, regenerating ({regen_count})...")
-
-                                graph_file_path = f"dataset/images/{index}_it{regen_count + 1}.png"
+                                print(f"Graph {i+1} needs correction, regenerating ({regen_count})... Time: {(time.perf_counter() - time_start):.04f}")
+                                
+                                graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it{img_count + 1}.png")
 
                                 code = recode_call(dataset_sem.get("features"), graph_types[i], code, feedback["feedback"], json.dumps(head_json))
 
@@ -703,26 +921,28 @@ if __name__ == "__main__":
                                 graph_data = exec_ns.get("graph_data", None)
                                 graph_df   = exec_ns.get("graph_df", None)
 
-
                                 regen_count += 1
-                                imgs.append(graph_file_path)
+                                img_count += 1
                             else:
                                 imgs.append({ 
-                                    "path": graph_file_path,
+                                    "path": os.path.relpath(graph_file_path, DATASET_FOLDER),
                                     "feedback": feedback["feedback"],
                                     "code": code
                                 })
                                 break
-                            break
+
                         except Exception as e:
                             print(f"Error during graph checking, retrying... {e}")
-                            graph_file_path = f"dataset/images/{index}_it{regen_count}.png"
+                            graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it{img_count}.png") # We set this to the latest available image to use in description generation and questions
+                            
                             regen_count += 1
                             continue
                 else:
+                    feedback = check_call(graph_file_path, code)
+
                     imgs.append({ 
-                        "path":graph_file_path, 
-                        "feedback": None,
+                        "path":os.path.relpath(graph_file_path, DATASET_FOLDER), 
+                        "feedback": feedback["feedback"],
                         "code": code
                     })
 
@@ -730,11 +950,29 @@ if __name__ == "__main__":
                 graph_data = graph_data  # from executed code   
                 graph_df = graph_df  # from executed code
 
+                print(f"Generating description... Time: {(time.perf_counter() - time_start):.04f}")
+
                 description = describe_graph_png(imgs[-1]["path"], code, graph_data, graph_df, desc_dataset["description"], graph_types[i]["description"])
+
+                print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}")
 
                 questions = generate_graph_questions(imgs[-1]["path"], desc_dataset["description"], description, graph_data)
 
-                with open(os.path.join(DATASET_FOLDER, "metadata.jsonl"), "a", encoding="utf-8") as f:
+                print(f"Labeling questions")
+
+                try:
+                    rerun_labels = 0
+                    labels = []
+                    while len(labels) != len(questions):
+                        labels = give_question_types(questions)
+
+                    for l, q in enumerate(questions):
+                        questions[l]["type"] = labels[l]
+
+                except Exception as e:
+                    print("Couldnt generate question types", e)
+
+                with open(os.path.join(DATASET_FOLDER, args.metadata_file), "a", encoding="utf-8") as f:
                     obj = {
                         "id": str(uuid.uuid4()),
                         "dataset": {
@@ -758,6 +996,8 @@ if __name__ == "__main__":
                 i += 1
                 """ pbar.update(1) """
                 rerun = 0
+
+                print(f"Finished graph... Time: {(time.perf_counter() - time_start):.04f}")
 
             except Exception as e:
                 print(f"Error generating graph, retrying... {e}")
