@@ -1,18 +1,10 @@
-import json, pandas as pd, numpy as np, matplotlib.pyplot as plt
-from sklearn import datasets
+import json
 import os
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
-import json
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib
 import base64
-import base64
-import json
 
 import time
-from tqdm import tqdm
 import uuid
 import re
 import gc 
@@ -26,13 +18,15 @@ import glob
 from PIL import Image
 from io import BytesIO
 
+from tqdm import tqdm
+
 from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 
 def split_think(text:str):
-    if "<think>" in text and "</think>" in text:
-        athink = text.split("</think>", 1)[1]
-        think = text.split("</think>", 1)[0]
+    if "</think>" in text:
+        think, athink = text.split("</think>", 1)
+        think = think.replace("<think>", "").strip()
 
         athink = athink.strip()
         
@@ -44,9 +38,11 @@ def format_messages(messages, data_dir):
     msgs_out = []
     images = []
 
-    for m in messages:
+    for i, m in enumerate(messages):
         content = f"Answer this question about the given chart and the description of the data used to make it.\n\nDataset description: {m['dataset_description']}\n\nQuestion:\n{ m['question']['question'] }"
         img = Image.open(os.path.join(data_dir, m["image"]))
+
+        print(i, os.path.getsize(os.path.join(data_dir, m["image"])))
 
         images.append(img)
 
@@ -82,12 +78,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--metadata-file", type=str, required=False, default="metadata.jsonl")
-    parser.add_argument("--model_path", type=str, required=False, default="/workspace/models/qwen3.5-9b")
+    parser.add_argument("--metadata_file", type=str, required=False, default="metadata.jsonl")
+    parser.add_argument("--model_path", type=str, required=False, default="/workspace/models")
     parser.add_argument("--model_name", type=str, required=False, default="qwen3.5-9b")
+    parser.add_argument("--check_model_name", type=str, required=False, default="qwen3.5-9b")
     parser.add_argument("--thinking", action="store_true", default=False)
+    parser.add_argument("--batch_size", type=int, required=False, default=32)
 
     args = parser.parse_args()
+
+    model_path = os.path.join(args.model_path, args.model_name)
+    model_path_check = os.path.join(args.model_path, args.check_model_name)
 
     MAIN_DIR = Path(__file__).resolve().parent
     DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
@@ -108,24 +109,25 @@ if __name__ == "__main__":
             for q in questions:
                 questions_all.append({
                     "graph_id": graph["id"],
+                    "graph_type": graph["graph"]["type"],
                     "image": image["path"],
                     "question": q,
                     "dataset_description": dataset_desc 
                 })
 
-    processor_test = AutoProcessor.from_pretrained(args.model_path)
+    processor_test = AutoProcessor.from_pretrained(model_path)
     llm_test = LLM(
-        model=args.model_path,
-        gpu_memory_utilization=0.97,
-        max_num_seqs=16,
-        max_num_batched_tokens=16384,
+        model=model_path,
+        gpu_memory_utilization=0.92,
+        max_num_seqs=32,
+        max_model_len=20000,
+        max_num_batched_tokens=16384*2,
+        tensor_parallel_size=2
     )
-
-    formatted, images = format_messages(questions_all, DATASET_FOLDER)
 
     inputs = []
 
-    batch_size = 512
+    batch_size = args.batch_size
 
     for batch_start, batch in enumerate(batched(questions_all, batch_size)):
         formatted, images = format_messages(batch, DATASET_FOLDER)
@@ -151,27 +153,30 @@ if __name__ == "__main__":
 
         outputs = llm_test.generate(
             inputs,
-            SamplingParams(temperature=1, max_tokens=200)
+            SamplingParams(temperature=0.6, max_tokens=None)
         )
 
         for item, out in zip(batch, outputs):
             think, answer = split_think(out.outputs[0].text)
             item["test_answer"] = answer
 
+        print(think)
+
     del formatted, images, inputs, outputs
 
     del llm_test
     gc.collect()
 
-    processor_check = AutoProcessor.from_pretrained(args.model_path)
+    processor_check = AutoProcessor.from_pretrained(model_path_check)
     llm_check = LLM(
-        model=args.model_path,
-        gpu_memory_utilization=0.97,
-        max_num_seqs=16,
-        max_num_batched_tokens=16384,
+        model=model_path_check,
+        gpu_memory_utilization=0.92,
+        max_num_seqs=32,
+        max_model_len=20000,
+        max_num_batched_tokens=16384 * 2,
     )
 
-    batch_size = 512
+    batch_size = args.batch_size
 
     for batch in batched(questions_all, batch_size):
         formatted = format_messages_check(batch)
@@ -183,7 +188,7 @@ if __name__ == "__main__":
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=args.thinking,
+                enable_thinking=False,
             )
 
             req = {"prompt": prompt}
@@ -191,7 +196,7 @@ if __name__ == "__main__":
 
         outputs = llm_check.generate(
             inputs_check,
-            SamplingParams(temperature=0, max_tokens=16)
+            SamplingParams(temperature=0, max_tokens=32)
         )
 
         for item, out in zip(batch, outputs):

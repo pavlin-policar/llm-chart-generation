@@ -1,4 +1,3 @@
-import json, pandas as pd, numpy as np, matplotlib.pyplot as plt
 from langchain_openai import ChatOpenAI
 from sklearn import datasets
 import os
@@ -191,7 +190,7 @@ def get_random_ds(d_meta, rng):
 
 # LLM CALLS ---------------------------------------------------------------------------------------------------
 
-def after_think(text: str) -> str:
+def after_think(text: str):
     athink = text.split("</think>", 1)[1] if "<think>" in text else text
     think = text.split("</think>", 1)[0] if "<think>" in text else None
     return think, athink
