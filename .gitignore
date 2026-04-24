@@ -1,4 +1,13 @@
-dataset/
-models/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
 
+# Data
+dataset/
+results/
+models/
 *.jsonl
+
+# Viewer cache
+dataset-viewer/.cache/
