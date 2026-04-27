@@ -42,6 +42,36 @@ st.set_page_config(page_title="Chart Dataset Viewer", layout="wide")
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+def _iter_sort_key(img: dict) -> int:
+    stem = Path(img.get("path", "")).stem
+    if "_it" in stem:
+        try:
+            return int(stem.rsplit("_it", 1)[1])
+        except ValueError:
+            pass
+    return 0
+
+
+_REFINEMENT_MAX_ROUNDS = 3
+
+
+def _quality(rec: dict) -> str:
+    """'bad' if the chart reached _it3+ AND that final image still has feedback."""
+    images = [
+        img for img in rec.get("images", [])
+        if isinstance(img, dict) and isinstance(img.get("path"), str)
+    ]
+    if not images:
+        return "good"
+    last = max(images, key=_iter_sort_key)
+    if _iter_sort_key(last) < _REFINEMENT_MAX_ROUNDS:
+        return "good"
+    fb = last.get("feedback") or ""
+    if isinstance(fb, list):
+        fb = " ".join(str(x).strip() for x in fb if str(x).strip())
+    return "bad" if str(fb).strip() else "good"
+
+
 @st.cache_resource(show_spinner="Loading metadata…")
 def load_metadata() -> list[dict]:
     records: list[dict] = []
@@ -55,6 +85,7 @@ def load_metadata() -> list[dict]:
             except json.JSONDecodeError:
                 continue
             rec["_canonical_type"] = canonicalize(rec.get("graph", {}).get("type", ""))
+            rec["_quality"] = _quality(rec)
             records.append(rec)
     return records
 
@@ -215,6 +246,11 @@ def _init_state(records: list[dict]) -> None:
         else:
             st.session_state["dataset_filter"] = "(all)"
 
+    # Quality filter
+    if "quality_filter" not in st.session_state:
+        qp_quality = qp.get("quality") or ""
+        st.session_state["quality_filter"] = qp_quality if qp_quality in ("good", "bad") else "(all)"
+
     # Search (text input, key='search')
     if "search" not in st.session_state:
         st.session_state["search"] = qp.get("search") or ""
@@ -238,7 +274,8 @@ def _init_state(records: list[dict]) -> None:
 
 
 def current_filter_qp(
-    sel_type: str, sel_dataset: str, search: str, page: int, sort_by: str, sort_asc: bool
+    sel_type: str, sel_dataset: str, search: str, page: int, sort_by: str, sort_asc: bool,
+    quality: str = "(all)",
 ) -> dict[str, str]:
     """Build the filter/sort portion of the URL query params."""
     out: dict[str, str] = {}
@@ -248,6 +285,8 @@ def current_filter_qp(
         out["dataset"] = sel_dataset
     if search:
         out["search"] = search
+    if quality != "(all)":
+        out["quality"] = quality
     if page:
         out["page"] = str(page)
     if sort_by != "Default":
@@ -280,7 +319,7 @@ def clear_selection() -> None:
 SORT_OPTIONS = ["Default", "Incorrect answers"]
 
 
-def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool]:
+def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool, str]:
     type_counts = Counter(r["_canonical_type"] for r in records)
     types = ["(all)"] + [f"{t} ({n})" for t, n in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
@@ -321,7 +360,23 @@ def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool]:
         except IndexError:
             selected_dataset = "(all)"
 
-    search = st.sidebar.text_input("Search (dataset / description)", key="search").strip().lower()
+    search = st.sidebar.text_input("Search (dataset / description / ID)", key="search").strip().lower()
+
+    good_count = sum(1 for r in records if r["_quality"] == "good")
+    bad_count = sum(1 for r in records if r["_quality"] == "bad")
+    quality_opts = ["(all)", f"Good ({good_count})", f"Bad ({bad_count})"]
+    quality_keys = {"(all)": "(all)", f"Good ({good_count})": "good", f"Bad ({bad_count})": "bad"}
+    quality_display_map = {"(all)": "(all)", "good": f"Good ({good_count})", "bad": f"Bad ({bad_count})"}
+    q_state = st.session_state.get("quality_filter", "(all)")
+    q_display_default = quality_display_map.get(q_state, "(all)")
+    q_display = st.sidebar.selectbox(
+        "Plot quality",
+        quality_opts,
+        index=quality_opts.index(q_display_default) if q_display_default in quality_opts else 0,
+        key="quality_filter_display",
+    )
+    quality = quality_keys.get(q_display, "(all)")
+    st.session_state["quality_filter"] = quality
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Sort**")
@@ -343,7 +398,7 @@ def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool]:
     st.sidebar.caption(
         f"{len(records)} total charts · {len(type_counts)} canonical types · {len(ds_counts)} datasets"
     )
-    return selected_type, selected_dataset, search, sort_by, st.session_state["sort_asc"]
+    return selected_type, selected_dataset, search, sort_by, st.session_state["sort_asc"], quality
 
 
 def sort_records(
@@ -361,7 +416,7 @@ def sort_records(
     return records  # Default: preserve metadata.jsonl order
 
 
-def filter_records(records: list[dict], sel_type: str, sel_dataset: str, search: str) -> list[dict]:
+def filter_records(records: list[dict], sel_type: str, sel_dataset: str, search: str, quality: str = "(all)") -> list[dict]:
     out = records
     if sel_type != "(all)":
         out = [r for r in out if r["_canonical_type"] == sel_type]
@@ -371,12 +426,15 @@ def filter_records(records: list[dict], sel_type: str, sel_dataset: str, search:
         def match(r: dict) -> bool:
             g = r.get("graph", {})
             blob = " ".join([
+                str(r.get("id", "")),
                 str(r.get("dataset", {}).get("description", "")),
                 str(g.get("short_description", "")),
                 str(g.get("type", "")),
             ]).lower()
             return search in blob
         out = [r for r in out if match(r)]
+    if quality != "(all)":
+        out = [r for r in out if r["_quality"] == quality]
     return out
 
 
@@ -512,7 +570,72 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
 
     st.button("← Back to grid", on_click=clear_selection)
     st.subheader(f"{chart_block.get('type', 'Chart')}  —  {rec['_canonical_type']}")
-    st.caption(f"id `{gid}` · dataset #{ds.get('id', '?')}")
+    _copy_icon = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24"'
+        ' fill="none" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round">'
+        '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>'
+        '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>'
+        '</svg>'
+    )
+    _check_icon = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24"'
+        ' fill="none" stroke="#16a34a" stroke-width="2.5"'
+        ' stroke-linecap="round" stroke-linejoin="round">'
+        '<polyline points="20 6 9 17 4 12"></polyline>'
+        '</svg>'
+    )
+    st.components.v1.html(
+        f"""
+        <style>
+          body {{ margin:0; padding:0; background:transparent; }}
+          #row {{ display:flex; align-items:center; gap:8px;
+                  font-size:13px; color:#6b7280;
+                  font-family:system-ui,-apple-system,sans-serif; }}
+          #pill {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+                   font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;
+                   color:#c2410c; padding:2px 7px; background:#fff7ed;
+                   border-radius:4px; border:1px solid #fed7aa; user-select:none; }}
+          #pill:hover {{ background:#ffedd5; }}
+          #icon-wrap {{ position:relative; width:13px; height:13px; }}
+          #icon-copy, #icon-check {{
+            position:absolute; top:0; left:0;
+            display:inline-flex; align-items:center;
+            transition: opacity 400ms ease, transform 400ms ease;
+          }}
+          #icon-check {{ opacity:0; transform:scale(0.5); }}
+        </style>
+        <div id="row">
+          <div id="pill" onclick="doCopy()">
+            <span>{gid}</span>
+            <span id="icon-wrap">
+              <span id="icon-copy">{_copy_icon}</span>
+              <span id="icon-check">{_check_icon}</span>
+            </span>
+          </div>
+          <span>· dataset #{ds.get("id", "?")}</span>
+        </div>
+        <script>
+          var busy = false;
+          function doCopy() {{
+            if (busy) return;
+            navigator.clipboard.writeText('{gid}').then(function() {{
+              busy = true;
+              var cp = document.getElementById('icon-copy');
+              var ck = document.getElementById('icon-check');
+              cp.style.opacity = '0'; cp.style.transform = 'scale(0.5)';
+              ck.style.opacity = '1'; ck.style.transform = 'scale(1)';
+              setTimeout(function() {{
+                ck.style.opacity = '0'; ck.style.transform = 'scale(0.5)';
+                cp.style.opacity = '1'; cp.style.transform = 'scale(1)';
+                setTimeout(function() {{ busy = false; }}, 400);
+              }}, 1500);
+            }});
+          }}
+        </script>
+        """,
+        height=34,
+    )
 
     iters = ordered_iterations(rec.get("images", []))
 
@@ -705,17 +828,17 @@ def main() -> None:
     chart_stats = compute_per_chart_stats()
     _init_state(records)
 
-    sel_type, sel_dataset, search, sort_by, sort_asc = render_sidebar(records)
+    sel_type, sel_dataset, search, sort_by, sort_asc, quality = render_sidebar(records)
 
     # Reset page AND selection if filter changed — jump back to the grid.
-    filter_key = (sel_type, sel_dataset, search, sort_by, sort_asc)
+    filter_key = (sel_type, sel_dataset, search, sort_by, sort_asc, quality)
     last_filter = st.session_state.get("_last_filter")
     if last_filter is not None and last_filter != filter_key:
         st.session_state["page"] = 0
         clear_selection()
     st.session_state["_last_filter"] = filter_key
 
-    filter_qp = current_filter_qp(sel_type, sel_dataset, search, st.session_state["page"], sort_by, sort_asc)
+    filter_qp = current_filter_qp(sel_type, sel_dataset, search, st.session_state["page"], sort_by, sort_asc, quality)
     sync_url(filter_qp, st.session_state["selected_id"])
 
     if st.session_state["selected_id"]:
@@ -727,7 +850,7 @@ def main() -> None:
             render_detail(selected, result_indexes)
             return
 
-    filtered = filter_records(records, sel_type, sel_dataset, search)
+    filtered = filter_records(records, sel_type, sel_dataset, search, quality)
     filtered = sort_records(filtered, sort_by, sort_asc, chart_stats)
     render_grid(filtered, filter_qp)
 
