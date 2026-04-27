@@ -12,7 +12,7 @@ def _index_path(cache_dir: Path, results_file: Path) -> Path:
 
 
 def build_index(results_file: Path, cache_dir: Path) -> dict[str, list[tuple[int, int]]]:
-    """Return {graph_id: [(offset, length), ...]}, caching to disk.
+    """Return {chart_id: [(offset, length), ...]}, caching to disk.
 
     Invalidated when the results file's mtime/size changes.
     """
@@ -38,7 +38,7 @@ def build_index(results_file: Path, cache_dir: Path) -> dict[str, list[tuple[int
             length = len(raw)
             try:
                 rec = json.loads(raw)
-                gid = rec.get("graph_id")
+                gid = rec.get("chart_id") or rec.get("graph_id")
                 if gid:
                     index[gid].append((offset, length))
             except json.JSONDecodeError:

@@ -75,7 +75,7 @@ dataset-viewer/
 
 On first run, the app builds two types of disk cache under `.cache/`:
 
-- **Per-model byte-offset indexes** (`*.idx.pkl`) — one per result file, enables O(1) record lookup by `graph_id` without loading 50 MB files into memory.
-- **Per-graph answer stats** (`per_graph_stats.pkl`) — correct/incorrect counts per chart summed across all models, used for sorting. Takes ~5s to build; instant on subsequent runs.
+- **Per-model byte-offset indexes** (`*.idx.pkl`) — one per result file, enables O(1) record lookup by `chart_id` (or legacy `graph_id`) without loading 50 MB files into memory.
+- **Per-chart answer stats** (`per_chart_stats.pkl`) — correct/incorrect counts per chart summed across all models, used for sorting. Takes ~5s to build; instant on subsequent runs.
 
 Both caches are invalidated automatically when the underlying result files change.

@@ -25,7 +25,7 @@ from indexer import build_index, read_records
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_DEFAULT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_ROOT = Path(__file__).resolve().parent.parent.parent
 ROOT = Path(os.environ["DATA_DIR"]) if "DATA_DIR" in os.environ else _DEFAULT_ROOT
 DATASET_DIR = ROOT / "dataset"
 IMAGES_DIR = DATASET_DIR / "images"
@@ -68,16 +68,16 @@ def load_result_indexes() -> dict[str, dict[str, list[tuple[int, int]]]]:
 
 
 @st.cache_resource(show_spinner="Computing per-chart answer stats…")
-def compute_per_graph_stats() -> dict[str, dict[str, int]]:
-    """Return {graph_id: {correct: N, incorrect: N}} summed across all models.
+def compute_per_chart_stats() -> dict[str, dict[str, int]]:
+    """Return {chart_id: {correct: N, incorrect: N}} summed across all models.
 
-    Results are persisted to .cache/per_graph_stats.pkl and only recomputed
+    Results are persisted to .cache/per_chart_stats.pkl and only recomputed
     when the result files change.
     """
     import pickle
     from collections import defaultdict
 
-    cache_file = CACHE_DIR / "per_graph_stats.pkl"
+    cache_file = CACHE_DIR / "per_chart_stats.pkl"
     result_files = sorted(RESULTS_DIR.glob("*.jsonl"))
 
     fingerprint = tuple(
@@ -507,11 +507,11 @@ _GRID_CSS = """
 
 def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int, int]]]]) -> None:
     gid = rec["id"]
-    graph = rec.get("graph", {})
+    chart_block = rec.get("graph", {})
     ds = rec.get("dataset", {})
 
     st.button("← Back to grid", on_click=clear_selection)
-    st.subheader(f"{graph.get('type', 'Chart')}  —  {rec['_canonical_type']}")
+    st.subheader(f"{chart_block.get('type', 'Chart')}  —  {rec['_canonical_type']}")
     st.caption(f"id `{gid}` · dataset #{ds.get('id', '?')}")
 
     iters = ordered_iterations(rec.get("images", []))
@@ -555,8 +555,8 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
             st.info("No images recorded for this chart.")
 
     with right:
-        short = (graph.get("short_description") or "").strip()
-        full = (graph.get("full_description") or "").strip()
+        short = (chart_block.get("short_description") or "").strip()
+        full = (chart_block.get("full_description") or "").strip()
         if short:
             st.markdown("**Summary**")
             st.markdown(short)
@@ -566,16 +566,16 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
         if full:
             with st.expander("Full chart description"):
                 st.markdown(full)
-        if graph.get("code"):
+        if chart_block.get("code"):
             with st.expander("Final generation code"):
-                st.code(graph["code"], language="python")
-        sd = graph.get("structured_data")
+                st.code(chart_block["code"], language="python")
+        sd = chart_block.get("structured_data")
         if sd:
             with st.expander("Structured data (JSON)"):
                 st.json(sd, expanded=False)
 
     st.markdown("---")
-    render_questions(gid, graph.get("questions", []) or [], result_indexes)
+    render_questions(gid, chart_block.get("questions", []) or [], result_indexes)
 
 
 def render_questions(
@@ -588,7 +588,7 @@ def render_questions(
         st.caption("No questions for this chart.")
         return
 
-    # Collect all per-model records for this graph, once.
+    # Collect all per-model records for this chart, once.
     per_model_records: dict[str, list[dict]] = {}
     for model_name, index in result_indexes.items():
         locs = index.get(gid)
@@ -702,7 +702,7 @@ def render_questions(
 def main() -> None:
     records = load_metadata()
     result_indexes = load_result_indexes()
-    graph_stats = compute_per_graph_stats()
+    chart_stats = compute_per_chart_stats()
     _init_state(records)
 
     sel_type, sel_dataset, search, sort_by, sort_asc = render_sidebar(records)
@@ -728,7 +728,7 @@ def main() -> None:
             return
 
     filtered = filter_records(records, sel_type, sel_dataset, search)
-    filtered = sort_records(filtered, sort_by, sort_asc, graph_stats)
+    filtered = sort_records(filtered, sort_by, sort_asc, chart_stats)
     render_grid(filtered, filter_qp)
 
 
