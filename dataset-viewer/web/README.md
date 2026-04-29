@@ -5,6 +5,14 @@ loads only the global manifest and chart index at startup, shows thumbnails
 from static URLs, and fetches one chart's metadata/results/images only when a
 chart detail page is opened.
 
+The public deployment is available at
+<https://llm-chart-generation.streamlit.app>.
+
+The raw static data used by the public viewer is available from the Biolab file
+server at <https://file.biolab.si/llm-chart-generation/>. It includes the
+manifest, chart index, thumbnails, per-chart metadata, per-chart model results,
+and chart images.
+
 ## Streamlit Deployment
 
 Streamlit Community Cloud entrypoint:

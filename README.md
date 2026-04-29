@@ -2,6 +2,16 @@
 
 Code for the structured LLM-based workflow that generates statistical figures from tabular data, along with a browser for the resulting dataset.
 
+## Dataset Access
+
+An interactive viewer for the generated dataset is available at
+<https://llm-chart-generation.streamlit.app>.
+
+The raw static data used by the viewer is available from the Biolab file server
+at <https://file.biolab.si/llm-chart-generation/>. The server includes the
+global manifest and chart index, plus per-chart metadata, model results, and
+images.
+
 ## Directories
 
 ### `generation_pipeline/`
@@ -15,4 +25,4 @@ The dataset generation pipeline. Given tabular data, it runs a staged workflow â
 
 ### `dataset-viewer/`
 
-A Streamlit app for browsing the generated dataset. Displays the 2,228 charts with per-iteration images, generation feedback, code, questions, and per-model evaluation results. See `dataset-viewer/README.md` for setup and usage.
+A Streamlit app for browsing the generated dataset. Displays the 2,228 charts with per-iteration images, generation feedback, code, questions, and per-model evaluation results. The public instance is available at <https://llm-chart-generation.streamlit.app>. See `dataset-viewer/README.md` for setup and usage.

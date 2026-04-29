@@ -26,6 +26,7 @@ APP_SUBTITLE = (
 )
 THUMBS_PER_PAGE = 24
 SORT_OPTIONS = ["Default", "Incorrect answers"]
+DETAIL_IMAGE_MAX_HEIGHT_PX = 720
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -505,6 +506,33 @@ def resolve_detail_image_url(detail_url: str, path_str: str) -> str | None:
     return join_url(detail_url, path_str)
 
 
+def render_detail_image(image_url: str, alt: str) -> None:
+    safe_url = html.escape(image_url, quote=True)
+    safe_alt = html.escape(alt, quote=True)
+    st.markdown(
+        f"""
+        <div class="chart-detail-image">
+          <img src="{safe_url}" alt="{safe_alt}" />
+        </div>
+        <style>
+          .chart-detail-image {{
+            display: flex;
+            justify-content: center;
+            width: 100%;
+            margin-top: 0.25rem;
+          }}
+          .chart-detail-image img {{
+            display: block;
+            width: 100%;
+            max-height: min(70vh, {DETAIL_IMAGE_MAX_HEIGHT_PX}px);
+            object-fit: contain;
+          }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def chart_detail_urls(chart_row: dict, manifest: dict) -> tuple[str, str, str]:
     detail_url = chart_row.get("detail_url")
     if not detail_url:
@@ -550,7 +578,7 @@ def render_detail(chart_row: dict, manifest: dict) -> None:
             img = iters[chosen]
             image_url = resolve_detail_image_url(detail_url, img.get("path", ""))
             if image_url:
-                st.image(image_url, use_container_width=True)
+                render_detail_image(image_url, f"{chart_block.get('type', 'Chart')} iteration {chosen}")
             else:
                 st.warning(f"Image not found: {img.get('path')}")
 
