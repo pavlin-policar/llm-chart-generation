@@ -31,7 +31,7 @@ The workflow is centered around transforming tabular data into structured visual
 
 ## Typical Workflow
 
-1. Start a local `vLLM` server for generation.
+1. Start a local `vLLM` server for generation. (The code should probably be able to connect to a remote provider like OpenRouter, although this was not tested. so use carefully.)
 2. Generate charts and metadata with `generation_job.py`, then close the vLLM server.
 3. Join metadata files with `join_metadata.py` if you ran generation in parallel. 
 4. OPTIONAL: You can rerun the question type assigment with `add_question_types.py`
@@ -81,7 +81,7 @@ The evaluation scripts will expect
   - `python generation_pipeline/evaluation_job.py --metadata_file metadata.jsonl --model_path /workspace/models --model_name qwen3.5-27b`
 
 - Online evaluation via OpenRouter/OpenAI-compatible API:
-  - `python generation_pipeline/evaluation_online.py --metadata_file metadata0_0.jsonl --model_name qwen/qwen3-vl-32b-instruct --check_model_name qwen3.5-9b --max_workers 16`
+  - `python generation_pipeline/evaluation_online.py --metadata_file metadata.jsonl --model_name qwen/qwen3-vl-32b-instruct --check_model_name qwen3.5-9b --max_workers 16`
 
 - Join generated metadata files:
   - `python generation_pipeline/join_metadata.py --directory ./dataset --min-number 0 --filename metadata.jsonl`
