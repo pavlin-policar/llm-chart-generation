@@ -1,10 +1,10 @@
 """Streamlit viewer for the generated chart dataset.
 
 Run:
-    streamlit run app.py
+    streamlit run local/app.py
 
 Set DATA_DIR to point at the directory containing dataset/ and results/:
-    DATA_DIR=/path/to/data streamlit run app.py
+    DATA_DIR=/path/to/data streamlit run local/app.py
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from indexer import build_index, read_records
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_DEFAULT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_ROOT = Path(__file__).resolve().parents[3]
 ROOT = Path(os.environ["DATA_DIR"]) if "DATA_DIR" in os.environ else _DEFAULT_ROOT
 DATASET_DIR = ROOT / "dataset"
 IMAGES_DIR = DATASET_DIR / "images"

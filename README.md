@@ -23,6 +23,16 @@ The pipeline schematic illustrates the staged generation workflow from dataset s
 
 The example figure shows selected generated charts together with their associated questions. It demonstrates the kind of visualizations produced by the pipeline and how the generated questions are aligned with the rendered charts.
 
+## Dataset Access
+
+An interactive viewer for the generated dataset is available at
+<https://llm-chart-generation.streamlit.app>.
+
+The raw static data used by the viewer is available from the Biolab file server
+at <https://file.biolab.si/llm-chart-generation/>. The server includes the
+global manifest and chart index, plus per-chart metadata, model results, and
+images.
+
 ## Directories
 
 ### `generation_pipeline/`
@@ -39,4 +49,4 @@ See `generation_pipeline/README.md` for setup and usage.
 
 ### `dataset-viewer/`
 
-A Streamlit app for browsing the generated dataset. Displays the 2,228 charts with per-iteration images, generation feedback, code, questions, and per-model evaluation results. See `dataset-viewer/README.md` for setup and usage.
+A Streamlit app for browsing the generated dataset. Displays the 2,228 charts with per-iteration images, generation feedback, code, questions, and per-model evaluation results. The public instance is available at <https://llm-chart-generation.streamlit.app>. See `dataset-viewer/README.md` for setup and usage.

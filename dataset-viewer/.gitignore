@@ -1,4 +1,7 @@
 .venv/
 .cache/
 __pycache__/
+local/.cache/
+local/__pycache__/
+web/__pycache__/
 *.py[cod]
