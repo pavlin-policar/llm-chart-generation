@@ -23,7 +23,9 @@ The repository is organized as a simple pipeline schematic:
 
 ### Pipeline schematic
 
-![Generation pipeline schematic](figures/fig_schematic3-1.png)
+<p align="center">
+  <img src="figures/fig_schematic3-1.png" alt="Generation pipeline schematic" width="65%">
+</p>
 
 The pipeline schematic illustrates the staged generation workflow from dataset selection, through LLM-driven plot proposal and code generation, to final chart rendering and question-answer evaluation. It shows how dataset semantics, graph planning, visual quality review, and QA generation fit together.
 
