@@ -1,0 +1,12 @@
+langchain-openai
+langchain-core
+openai
+vllm
+transformers
+Pillow
+tqdm
+scikit-learn
+numpy
+matplotlib
+pandas
+openml

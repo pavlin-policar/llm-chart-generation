@@ -105,6 +105,9 @@ if __name__ == "__main__":
     IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
     EVAL_FOLDER = os.path.join(MAIN_DIR, "evaluation")
 
+    # Create folder if it doesnt exist
+    os.makedirs(EVAL_FOLDER, exist_ok=True)
+
     # Read the metadatafile and store the neccessary fields.
     with open(os.path.join(DATASET_FOLDER, args.metadata_file)) as f:
         

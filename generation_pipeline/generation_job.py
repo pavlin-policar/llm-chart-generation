@@ -802,7 +802,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--metadata_file", type=str, required=False, default="metadata.jsonl") # Name of the output file in the dataset folder.
+    parser.add_argument("--metadata_file", type=str, required=False, default="") # Name of the output file in the dataset folder. If you're parallelizing should be left blank.
     parser.add_argument("--start_index",  type=int, required=False, default=0) # Starting index of the output image.
     parser.add_argument("--datasets", type=int, required=False, default=10) # For how many datasets to generate the image.
     parser.add_argument("--regenerate", action="store_true", default=False) # Whether to iteratively refine graphs.
@@ -817,7 +817,8 @@ if __name__ == "__main__":
 
     print(f"JOB ID: {job_id}")
 
-    args.metadata_file = f"metadata{job_id}.jsonl"
+    if args.metadata_file == "":
+        args.metadata_file = f"metadata{job_id}.jsonl"
 
     # MAIN_DIR is set to the git repository folder
     MAIN_DIR = Path(__file__).resolve().parent
@@ -826,6 +827,9 @@ if __name__ == "__main__":
     IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
     GENERATE_DS_IMAGES = args.datasets
     FEEDBACK = args.regenerate
+
+    os.makedirs(DATASET_FOLDER, exist_ok=True)
+    os.makedirs(IMAGES_FOLDER, exist_ok=True)
 
     # If start_index is -1 count files in folder and index from there.
     # Probably better to use UUID for saving but impractical when reviewing the dataset.
