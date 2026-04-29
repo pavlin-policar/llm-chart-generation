@@ -19,10 +19,15 @@ import streamlit as st
 
 
 DEFAULT_MANIFEST_URL = "https://file.biolab.si/llm-chart-generation/manifest.json"
+APP_TITLE = "Validation-Driven LLM Workflows for Statistical Chart Generation"
+APP_SUBTITLE = (
+    "Dataset viewer for generated statistical charts from tabular data, with chart descriptions, "
+    "question-answer pairs, and multimodal model responses."
+)
 THUMBS_PER_PAGE = 24
 SORT_OPTIONS = ["Default", "Incorrect answers"]
 
-st.set_page_config(page_title="Chart Dataset Viewer", layout="wide")
+st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 
 # ---------------------------------------------------------------------------
@@ -398,9 +403,13 @@ GRID_CSS = """
   border-top: 1px solid #f0f0f0;
 }
 .chart-card__id {
+  display: block;
+  margin-top: 3px;
   color: #6b7280;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 @media (max-width: 1100px) {
   .chart-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -447,7 +456,7 @@ def render_grid(rows: list[dict], filter_qp: dict[str, str]) -> None:
     cards: list[str] = []
     for rec in subset:
         label = html.escape(str(rec.get("canonical_type", "")))
-        short_id = html.escape(str(rec["id"])[:8])
+        chart_id = html.escape(str(rec["id"]))
         thumb = rec.get("thumbnail_url") or ""
         if thumb:
             img_html = f'<img src="{html.escape(thumb)}" alt="{label}" loading="lazy" />'
@@ -459,7 +468,7 @@ def render_grid(rows: list[dict], filter_qp: dict[str, str]) -> None:
             f'<a class="chart-card" href="{html.escape(href)}" target="_self">'
             f'  <div class="chart-card__imgwrap">{img_html}</div>'
             f'  <div class="chart-card__label"><b>{label}</b><br/>'
-            f'    <span class="chart-card__id">{short_id}...</span>'
+            f'    <span class="chart-card__id">{chart_id}</span>'
             f'  </div>'
             f'</a>'
         )
@@ -698,6 +707,9 @@ def main() -> None:
     manifest = load_manifest(m_url)
     rows = load_chart_index(manifest)
     init_state(rows, manifest)
+
+    st.title(APP_TITLE)
+    st.caption(APP_SUBTITLE)
 
     sel_type, sel_dataset, search, sort_by, sort_asc, quality = render_sidebar(rows, manifest)
     filter_key = (sel_type, sel_dataset, search, sort_by, sort_asc, quality)
