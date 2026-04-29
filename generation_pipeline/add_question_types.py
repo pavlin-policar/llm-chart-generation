@@ -1,3 +1,5 @@
+# Helper script to generate question types after generation
+
 from pathlib import Path
 import json
 import glob
@@ -5,10 +7,6 @@ import tempfile
 import shutil
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
-from urllib.parse import urlencode
-from urllib.request import urlopen, Request
-from tqdm import tqdm
 
 JSONL_GLOB = "/workspace/projects/generate-graphs/dataset/*.jsonl"
 

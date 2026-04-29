@@ -2,21 +2,11 @@ import json
 import os
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
-import base64
-
-import time
-import uuid
-import re
 import gc 
-
 from pathlib import Path
-
 import argparse
 
-import glob
-
 from PIL import Image
-from io import BytesIO
 
 from tqdm import tqdm
 
@@ -24,6 +14,13 @@ from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 
 def split_think(text:str):
+    """
+    Used for initial testing of Qwen style models with reasoning.
+
+    This method is not important anymore as the models we are testing models without reasoning.
+    Kept in the code as it doesn't really hurt.
+    """
+
     if "</think>" in text:
         think, athink = text.split("</think>", 1)
         think = think.replace("<think>", "").strip()
@@ -35,6 +32,9 @@ def split_think(text:str):
     return None, text
 
 def format_messages(messages, data_dir):
+    """
+    Formats the prompts for the tested model into the proper format to be parsed by the processor.
+    """
     msgs_out = []
     images = []
 
@@ -54,6 +54,9 @@ def format_messages(messages, data_dir):
     return msgs_out, images
 
 def format_messages_check(messages):
+    """
+    Formats the prompts for the checking model into proper format to be parsed by the processor.
+    """
     msgs_out = []
 
     system_prompt = ("You are a teacher that has to grade students answers about charts.\n"
@@ -71,6 +74,9 @@ def format_messages_check(messages):
     return msgs_out
 
 def batched(seq, batch_size):
+    """
+    Used to return the batches for batched inference via vLLM.
+    """
     for i in range(0, len(seq), batch_size):
         yield seq[i:i + batch_size]
 
@@ -78,23 +84,28 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--metadata_file", type=str, required=False, default="metadata.jsonl")
-    parser.add_argument("--model_path", type=str, required=False, default="/workspace/models")
-    parser.add_argument("--model_name", type=str, required=False, default="qwen3.5-9b")
-    parser.add_argument("--check_model_name", type=str, required=False, default="qwen3.5-9b")
-    parser.add_argument("--thinking", action="store_true", default=False)
-    parser.add_argument("--batch_size", type=int, required=False, default=32)
+    parser.add_argument("--metadata_file", type=str, required=False, default="metadata.jsonl") # The file name of the metadata file located in the datset folder.
+    parser.add_argument("--model_path", type=str, required=False, default="/workspace/models") # Folder that contains the models
+    parser.add_argument("--model_name", type=str, required=False, default="qwen3.5-9b") # Folder name of the model we are testing
+    parser.add_argument("--check_model_name", type=str, required=False, default="qwen3.5-9b") # Folder name of the check model
+    parser.add_argument("--thinking", action="store_true", default=False) # Whether to use reasoning, this is currently supported for Qwen style models.
+    parser.add_argument("--batch_size_evaluation", type=int, required=False, default=32) # Batch size for evaluated model
+    parser.add_argument("--batch_size_check", type=int, required=False, default=32) # Batch size for check model
+    parser.add_argument("--tensor_parallel_size", type=int, required=False, default=1) # How many GPUs in parallel you need
+    parser.add_argument("--temperature", type=float, required=False, default=0.6) # Temparature of the evaluated model.
 
     args = parser.parse_args()
 
     model_path = os.path.join(args.model_path, args.model_name)
     model_path_check = os.path.join(args.model_path, args.check_model_name)
 
+    # MAIN_DIR is the directory of the repository
     MAIN_DIR = Path(__file__).resolve().parent
     DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
     IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
     EVAL_FOLDER = os.path.join(MAIN_DIR, "evaluation")
 
+    # Read the metadatafile and store the neccessary fields.
     with open(os.path.join(DATASET_FOLDER, args.metadata_file)) as f:
         
         questions_all = []
@@ -116,19 +127,22 @@ if __name__ == "__main__":
                 })
 
     processor_test = AutoProcessor.from_pretrained(model_path)
+
+    # Change these parameters if needed
     llm_test = LLM(
         model=model_path,
         gpu_memory_utilization=0.92,
-        max_num_seqs=32,
-        max_model_len=20000,
-        max_num_batched_tokens=16384*2,
-        tensor_parallel_size=2
+        max_num_seqs=args.batch_size_evaluation,
+        max_model_len=20000, # This can probably be lowered and it will still be okay.
+        max_num_batched_tokens=16384//16 * args.batch_size_evaluation,
+        tensor_parallel_size=args.tensor_parallel_size
     )
 
     inputs = []
 
-    batch_size = args.batch_size
+    batch_size = args.batch_size_evaluation
 
+    # Iterate over all the batches and produce proposed answers.
     for batch_start, batch in enumerate(batched(questions_all, batch_size)):
         formatted, images = format_messages(batch, DATASET_FOLDER)
 
@@ -153,7 +167,7 @@ if __name__ == "__main__":
 
         outputs = llm_test.generate(
             inputs,
-            SamplingParams(temperature=0.6, max_tokens=None)
+            SamplingParams(temperature=args.temperature, max_tokens=None)
         )
 
         for item, out in zip(batch, outputs):
@@ -168,16 +182,20 @@ if __name__ == "__main__":
     gc.collect()
 
     processor_check = AutoProcessor.from_pretrained(model_path_check)
+
+    # Change these parameters if needed
     llm_check = LLM(
         model=model_path_check,
         gpu_memory_utilization=0.92,
-        max_num_seqs=32,
-        max_model_len=20000,
-        max_num_batched_tokens=16384 * 2,
+        max_num_seqs=args.batch_size_check,
+        max_model_len=20000, # This can be lowered aswell.
+        max_num_batched_tokens=16384//16 * args.batch_size_check,
+        tensor_parallel_size=args.tensor_parallel_size
     )
 
-    batch_size = args.batch_size
+    batch_size = args.batch_size_check
 
+    # Iterate over all batches and grade the proposed answers.
     for batch in batched(questions_all, batch_size):
         formatted = format_messages_check(batch)
 
@@ -196,7 +214,7 @@ if __name__ == "__main__":
 
         outputs = llm_check.generate(
             inputs_check,
-            SamplingParams(temperature=0, max_tokens=32)
+            SamplingParams(temperature=0, max_tokens=32) # hete temparature should always be 0 for most unbiased grading.
         )
 
         for item, out in zip(batch, outputs):
@@ -214,11 +232,12 @@ if __name__ == "__main__":
     del llm_check
     gc.collect()
 
+    # Save the graded answers to file
     with open(os.path.join(EVAL_FOLDER, f"{args.model_name}{'_reasoning' if args.thinking else ''}.jsonl"), "a+") as f:
         for i, q in enumerate(questions_all):
-            f.write(json.dumps(questions_all[i]) + "\n")
-            
+            f.write(json.dumps(questions_all[i]) + "\n")     
 
+    # These are the currently supported types of questions, if new question types are added in generation, change this aswell.
     stats_dict = {
         "metadata": {
             "correct": 0,
@@ -246,7 +265,7 @@ if __name__ == "__main__":
         },
     }
 
-
+    # Save the aggregated counts to file
     with open(os.path.join(EVAL_FOLDER, f"{args.model_name}{'_reasoning' if args.thinking else ''}_params.json"), "w+") as f:
         for q in questions_all:
             qtype = q["question"].get("type")

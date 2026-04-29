@@ -1,3 +1,5 @@
+# Helper script to change image paths of the dataset because of a bug :D
+
 from pathlib import Path
 import json
 import glob
@@ -7,8 +9,6 @@ import shutil
 JSONL_GLOB = "/workspace/projects/generate-graphs/dataset/*.jsonl"
 
 OLD_PREFIX = "/workspace/projects/generate-graphs/dataset/"
-# result: dataset/images/...
-# if you want only images/... then use OLD_PREFIX = "/workspace/projects/generate-graphs/dataset/"
 
 for filepath in glob.glob(JSONL_GLOB):
     filepath = Path(filepath)
@@ -17,9 +17,7 @@ for filepath in glob.glob(JSONL_GLOB):
         continue
 
     with open(filepath, "r", encoding="utf-8") as f, \
-         tempfile.NamedTemporaryFile("w", delete=False, dir=filepath.parent, encoding="utf-8") as tmp:
-
-
+        tempfile.NamedTemporaryFile("w", delete=False, dir=filepath.parent, encoding="utf-8") as tmp:
 
         for line in f:
             obj = json.loads(line)
