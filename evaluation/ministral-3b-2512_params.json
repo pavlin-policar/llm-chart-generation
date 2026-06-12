@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "correct": 14860,
+    "incorrect": 1718,
+    "accuracy": 0.8963686813849681
+  },
+  "value extraction": {
+    "correct": 7485,
+    "incorrect": 4087,
+    "accuracy": 0.646819910127895
+  },
+  "comparison": {
+    "correct": 3069,
+    "incorrect": 1582,
+    "accuracy": 0.6598580950333262
+  },
+  "trends": {
+    "correct": 2586,
+    "incorrect": 1176,
+    "accuracy": 0.6874003189792663
+  },
+  "reasoning": {
+    "correct": 5056,
+    "incorrect": 2904,
+    "accuracy": 0.6351758793969849
+  },
+  "full": {
+    "correct": 33088,
+    "incorrect": 11475,
+    "accuracy": 0.7424993828961246
+  }
+}

@@ -1,11 +1,18 @@
 from langchain_core.messages import HumanMessage
 
 from helpers import after_think, strip_code_fences
+from tools import invoke_with_dataframe_tools
 
 import json
 import re
 import numpy as np
 import base64
+
+
+def invoke_llm(llm, messages, df=None, use_tools=False):
+    if use_tools and df is not None:
+        return invoke_with_dataframe_tools(llm, messages, df)
+    return llm.invoke(messages)
 
 def determine_dataset_call(llm, metadata) -> dict: # No reasoning
     """
@@ -162,7 +169,7 @@ def compute_info_call(llm, features, selected_plot, head): # No reasoning
 
     return out
 
-def plan_call(llm, features, selected_plot) -> str:
+def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
         "You will be given:\n"
@@ -181,14 +188,22 @@ def plan_call(llm, features, selected_plot) -> str:
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
     )
 
-    plan_raw = llm.invoke(plan_prompt).content
+    plan_raw = invoke_llm(llm, plan_prompt, df, use_tools).content
     _, plan_raw = after_think(plan_raw)
     plan = strip_code_fences(plan_raw)
 
     return plan
 
 
-def graph_call(llm, features, selected_plot, plan) -> str: # No reasoning plan, reasoning code
+def graph_call(
+    llm,
+    features,
+    selected_plot,
+    head,
+    plan,
+    df=None,
+    use_tools=False,
+) -> str: # No reasoning plan, reasoning code
     """
     Calls LLM -> generates the code needed to plot the graph.
 
@@ -250,7 +265,7 @@ def graph_call(llm, features, selected_plot, plan) -> str: # No reasoning plan, 
         f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n" if plan is not None else ""
     )
 
-    out = llm.invoke(code_prompt).content
+    out = invoke_llm(llm, code_prompt, df, use_tools).content
     try:
         _, out = after_think(out)
     except Exception:
@@ -320,7 +335,15 @@ def check_call(llm, image_path: str, plot_code: str) -> dict: # Reasoning
 
     return feedback
 
-def recode_call(llm, features, selected_plot, previous_code, corrections) -> dict: # Reasoning
+def recode_call(
+    llm,
+    features,
+    selected_plot,
+    previous_code,
+    corrections,
+    df=None,
+    use_tools=False,
+) -> dict: # Reasoning
     """
     Calls LLM -> given the previous code and and the feedback, regenerate the code to hopefully fix the mistakes.
 
@@ -387,7 +410,7 @@ def recode_call(llm, features, selected_plot, previous_code, corrections) -> dic
         f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
 
-    out = llm.invoke(prompt).content
+    out = invoke_llm(llm, prompt, df, use_tools).content
     _, out = after_think(out)
 
     code = out.replace("```python", "").replace("```", "")
@@ -466,7 +489,16 @@ def rejection_call(llm, image_path: str) -> dict:
 
     return feedback
 
-def describe_graph_png(llm, png_path, plot_code, graph_data, graph_df, dataset_desc, plot_description) -> str: # Reasoning
+def describe_graph_png(
+    llm,
+    png_path,
+    plot_code,
+    graph_data,
+    graph_df,
+    dataset_desc,
+    plot_description,
+    use_tools=False,
+) -> str: # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
     generate a longer, detailed description for the graph.
@@ -561,13 +593,22 @@ def describe_graph_png(llm, png_path, plot_code, graph_data, graph_df, dataset_d
         ]
     )
 
-    resp = llm.invoke([msg]).content
+    resp = invoke_llm(llm, [msg], graph_df, use_tools).content
 
     _, out = after_think(resp)
 
     return out
 
-def generate_graph_questions(llm, png_path, dataset_desc, plot_desc, graph_data, num) -> list[dict]:  # Reasoning
+def generate_graph_questions(
+    llm,
+    png_path,
+    dataset_desc,
+    plot_desc,
+    graph_data,
+    num,
+    graph_df=None,
+    use_tools=False,
+) -> list[dict]:  # Reasoning
     """
     Calls LLM -> given the image, dataset desctiption, metadata and full graph description,
     generate 20 question and answer pairs.
@@ -632,7 +673,7 @@ def generate_graph_questions(llm, png_path, dataset_desc, plot_desc, graph_data,
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
     ])
 
-    resp = llm.invoke([msg]).content
+    resp = invoke_llm(llm, [msg], graph_df, use_tools).content
 
     _, out = after_think(resp)
 
