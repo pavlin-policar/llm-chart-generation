@@ -1,216 +1,13 @@
-from langchain_openai import ChatOpenAI
-from sklearn import datasets
-import os
-from urllib.parse import urlencode
-from urllib.request import urlopen, Request
-import json
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib
-import base64
-import openml
-import base64
-import json
 from langchain_core.messages import HumanMessage
 
-import time
-from tqdm import tqdm
-import uuid
+from helpers import after_think, strip_code_fences
+
+import json
 import re
+import numpy as np
+import base64
 
-from pathlib import Path
-
-from sklearn.datasets import fetch_openml
-
-import argparse
-
-OPENML_LIST_URL = "https://www.openml.org/api/v1/json/data"
-
-API_URL = "http://localhost:8888/v1"
-
-# Non-reasoning client used for easier tasks
-llm = ChatOpenAI(
-    model="qwen3.5",   
-    openai_api_key="EMPTY",  # required but ignored by vLLM
-    openai_api_base=API_URL,
-    extra_body= {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }
-)
-
-# Reasoning model used for harder tasks
-llm_think = ChatOpenAI(
-    model="qwen3.5",  
-    openai_api_key="EMPTY",
-    openai_api_base=API_URL,
-    extra_body= {
-        "chat_template_kwargs": {"enable_thinking": True},
-        "logit_bias": {
-            "248069": 5.0,   # make </think> more likely to discourage reasoning loops
-        }
-    }
-)
-
-# DATASET HELPER FUNCTITIONS
-
-def openml_list_uci(status="active"):
-    """
-    Returns a list of dataset metadata dicts from OpenML, filtered by tag='uci',
-    using the OpenML *Python client* (no raw REST calls).
-
-    Notes:
-    - openml.datasets.list_datasets returns a dict keyed by dataset_id.
-    - The OpenML Python client does not expose a true server-side offset the same
-      way the REST endpoint does. We emulate offset/limit by slicing locally.
-    """
-    ds_dict = openml.datasets.list_datasets(tag="uci", status=status)
-
-    # Deterministic ordering for paging
-    all_ids = sorted(ds_dict.keys())
-
-    # Return list of metadata dicts (including dataset id)
-    datasets = []
-    for did in all_ids:
-        d = dict(ds_dict[did])  # copy
-        d["did"] = int(did)     # mimic REST field name you used
-        datasets.append(d)
-
-    return datasets
-
-
-def quality_to_dict(d):
-    """
-    Convert OpenML qualities into a dict.
-
-    With the Python client:
-    - list_datasets already returns qualities as flat keys (e.g. 'NumberOfInstances')
-      rather than a list of {'name','value'} dicts.
-    - If the input is from get_dataset(...).qualities it is also already a dict.
-
-    This function keeps compatibility and just returns a dict view.
-    """
-    if d is None:
-        return {}
-
-    # If it already looks like a dict of qualities, return it
-    if isinstance(d, dict):
-        return d
-
-    return {}
-
-
-def pick_random_dataset_id(datasets, rng, min_instances=200, max_features=2000):
-    """
-    Pick a dataset at random from the given metadata list (from openml_list_uci),
-    filtered by size constraints.
-    """
-    filtered = []
-
-    for d in datasets:
-        try:
-            did = int(d["did"])
-
-            # With list_datasets, these are typically direct keys
-            n = int(float(d.get("NumberOfInstances", 0)))
-            p = int(float(d.get("NumberOfFeatures", 0)))
-        except Exception:
-            continue
-
-        if n >= min_instances and 1 <= p <= max_features:
-            filtered.append(did)
-
-    if not filtered:
-        raise RuntimeError("No datasets passed the filters. Relax constraints.")
-
-    return int(rng.choice(filtered))
-
-def get_dataset_semantics(did, sleep_s=0.0):
-    """
-    Get dataset semantics using the OpenML Python client:
-    - name
-    - description
-    - feature schema (name, data_type, is_target)
-    """
-    ds = openml.datasets.get_dataset(int(did))
-
-    if sleep_s and sleep_s > 0:
-        time.sleep(sleep_s)
-
-    features = []
-    for _, f in sorted(ds.features.items(), key=lambda kv: kv[0]):
-        # f is usually an OpenMLDataFeature (attribute-based),
-        # but keep a fallback for dict-like cases.
-        name = getattr(f, "name", None) if not isinstance(f, dict) else f.get("name")
-        data_type = getattr(f, "data_type", None) if not isinstance(f, dict) else f.get("data_type")
-        is_target = getattr(f, "is_target", False) if not isinstance(f, dict) else f.get("is_target", False)
-
-        features.append({
-            "name": name,
-            "data_type": data_type,
-            "is_target": bool(is_target),
-        })
-
-    return {
-        "id": int(did),
-        "name": ds.name,
-        "description": ds.description,
-        "features": features,
-    }
-
-def get_random_ds(d_meta, rng):
-    """
-    Pick a random UCI dataset from metadata (list of dicts),
-    ensure ARFF format, and load the data as a pandas DataFrame.
-    """
-
-    # Pick dataset id using existing helper
-    data_id = pick_random_dataset_id(d_meta, rng=rng)
-
-    # Find corresponding metadata entry (d_meta is a list)
-    meta = next(d for d in d_meta if int(d["did"]) == int(data_id))
-
-    # Enforce ARFF format
-    fmt = str(meta.get("format", "")).upper()
-    if fmt != "ARFF":
-        raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
-
-    # Load dataset via OpenML client
-    ds = openml.datasets.get_dataset(data_id)
-
-    X, y, categorical_indicator, attribute_names = ds.get_data(
-        dataset_format="dataframe"
-    )
-
-    # Match old behavior: return full data including target column
-    if y is not None:
-        data = X.copy()
-        data[ds.default_target_attribute] = y
-    else:
-        data = X
-
-    return data_id, data
-
-
-# LLM CALLS 
-
-def after_think(text: str):
-    """
-    Split reasoning and response returned by Qwen.
-    """
-    athink = text.split("</think>", 1)[1] if "<think>" in text else text
-    think = text.split("</think>", 1)[0] if "<think>" in text else None
-    return think, athink
-
-def _strip_code_fences(s: str) -> str:
-    """
-    Strip python and json tags from LLM output.
-    """
-    s = s.strip()
-    s = re.sub(r"^```(?:json|python)?\s*", "", s)
-    s = re.sub(r"\s*```$", "", s)
-    return s.strip()
-
-def determine_dataset_call(metadata) -> dict:
+def determine_dataset_call(llm, metadata) -> dict: # No reasoning
     """
     Calls LLM -> tells us whether the datataset is useful for creating visualizations. 
     It also formats the description.
@@ -236,7 +33,7 @@ def determine_dataset_call(metadata) -> dict:
 
     return desc
 
-def graphs_call(features: dict, dataset_description: str) -> dict:
+def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> dict: # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset. 
     The specifications consist of graph type, short description, and features that should be used.
@@ -246,12 +43,14 @@ def graphs_call(features: dict, dataset_description: str) -> dict:
 
     creat = np.random.beta(2, 4, size=1)[0]
 
+    #TODO: implement amount of graphs chosen based on dataset
+
     prompt = (
         "You are a data visualization expert.\n"
         "You receive the head of a dataset in JSON format along with feature metadata.\n\n"
         "You also receive a description of the dataset.\n\n"
         "Task:\n"
-        "Generate EXACTLY 10 different plot specifications that could be created from this dataset.\n\n"
+        f"Generate EXACTLY {num_graphs} different plot specifications that could be created from this dataset.\n\n"
         "Rules:\n"
         "- Each plot must be semantically valid given the provided features.\n"
         "- Include BOTH basic plots AND more advanced or complex plots\n"
@@ -283,7 +82,7 @@ def graphs_call(features: dict, dataset_description: str) -> dict:
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    out = llm_think.invoke(prompt).content
+    out = llm.invoke(prompt).content
     _, out = after_think(out)
     out = out[out.find("["): out.rfind("]") + 1]
     
@@ -291,7 +90,7 @@ def graphs_call(features: dict, dataset_description: str) -> dict:
 
     return spec
 
-def replace_vars_call(features: dict, dataset_description: str):
+def replace_vars_call(llm, features: dict, dataset_description: str) -> dict: # No reasoning
     """
     Calls LLM -> replaces feature names in the dataset with a more semantically meaningful equaivalent.
     """
@@ -318,7 +117,7 @@ def replace_vars_call(features: dict, dataset_description: str):
 
     return desc
 
-def compute_info_call(features, selected_plot, head):
+def compute_info_call(llm, features, selected_plot, head): # No reasoning
     """
     Calls LLM -> returns detailed instructions on how to make a specified plot.
 
@@ -363,13 +162,7 @@ def compute_info_call(features, selected_plot, head):
 
     return out
 
-def graph_call(features, selected_plot, head) -> str:
-    """
-    Calls LLM -> generates the code needed to plot the graph.
-
-    It uses a planning step before the actual call, since this seems to improve the generation.
-    """
-
+def plan_call(llm, features, selected_plot) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
         "You will be given:\n"
@@ -386,12 +179,21 @@ def graph_call(features, selected_plot, head) -> str:
         "- Keep notes concise but not too short. (100-150 words)\n\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
-        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n"
     )
 
     plan_raw = llm.invoke(plan_prompt).content
     _, plan_raw = after_think(plan_raw)
-    plan = _strip_code_fences(plan_raw)
+    plan = strip_code_fences(plan_raw)
+
+    return plan
+
+
+def graph_call(llm, features, selected_plot, plan) -> str: # No reasoning plan, reasoning code
+    """
+    Calls LLM -> generates the code needed to plot the graph.
+
+    It uses a planning step before the actual call, since this seems to improve the generation.
+    """
 
     code_prompt = (
         "You are a plot rendering agent.\n"
@@ -444,19 +246,20 @@ def graph_call(features, selected_plot, head) -> str:
         "Inputs you must rely on:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
-        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
+        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n"
+        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n" if plan is not None else ""
     )
 
-    out = llm_think.invoke(code_prompt).content
+    out = llm.invoke(code_prompt).content
     try:
         _, out = after_think(out)
     except Exception:
         pass
 
-    code = _strip_code_fences(out)
+    code = strip_code_fences(out)
     return code
 
-def check_call(image_path: str, plot_code: str) -> str:
+def check_call(llm, image_path: str, plot_code: str) -> dict: # Reasoning
     """
     Calls LLM -> checks the graph and produces feedback and tells us whether it needs to be regenerated.
 
@@ -508,7 +311,7 @@ def check_call(image_path: str, plot_code: str) -> str:
         ]
     )
 
-    resp = llm_think.invoke([msg])
+    resp = llm.invoke([msg])
 
     out = resp.content
     _, out = after_think(out)
@@ -517,7 +320,7 @@ def check_call(image_path: str, plot_code: str) -> str:
 
     return feedback
 
-def recode_call(features, selected_plot, previous_code, corrections, head) -> dict:
+def recode_call(llm, features, selected_plot, previous_code, corrections) -> dict: # Reasoning
     """
     Calls LLM -> given the previous code and and the feedback, regenerate the code to hopefully fix the mistakes.
 
@@ -580,7 +383,6 @@ def recode_call(features, selected_plot, previous_code, corrections, head) -> di
         "Inputs you must rely on:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
-        f"HEAD:\n {json.dumps(head)}\n\n"
         f"previous_code: {json.dumps(previous_code or '', ensure_ascii=False)}\n\n"
         f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
@@ -592,7 +394,79 @@ def recode_call(features, selected_plot, previous_code, corrections, head) -> di
 
     return code
 
-def describe_graph_png(png_path, plot_code, graph_data, graph_df, dataset_desc, plot_description) -> str:
+def rejection_call(llm, image_path: str) -> dict:
+    """
+    Calls LLM -> given the image, return whether graph is good enough to be used in the dataset.
+    """
+
+    reject_prompt = (
+        "You are a visualization QA reviewer.\n"
+        "\n"
+        "You will be given:\n"
+        "1) An IMAGE of a chart or plot.\n"
+        "\n"
+        "Goal:\n"
+        "Decide whether the chart is readable and coherent enough to be accepted into a dataset as a valid visualization of data.\n"
+        "The main question is: can a person understand that this is a meaningful chart and read the visualized data reasonably well?\n"
+        "\n"
+        "Be lenient. The chart does NOT need to be beautiful, optimal, or publication-quality.\n"
+        "Only reject charts with serious readability or coherence problems.\n"
+        "\n"
+        "Accept the chart if:\n"
+        "- It clearly appears to visualize data.\n"
+        "- The main plotted values, trends, or patterns are visible.\n"
+        "- Axes, labels, legend, or context are readable enough when they are needed for interpretation.\n"
+        "- Categories, lines, bars, points, or other visual elements are distinguishable enough.\n"
+        "- The chart is not so cluttered, cut off, distorted, or low-quality that the data cannot be understood.\n"
+        "\n"
+        "Reject the chart ONLY if it has a severe issue that makes it unsuitable for the dataset, such as:\n"
+        "- Text, tick labels, legend, or axis labels are unreadable when needed for interpretation.\n"
+        "- Important chart elements are cut off or missing.\n"
+        "- The plot is too cluttered or overlapped to understand the data.\n"
+        "- Colors, lines, markers, or categories are impossible to distinguish.\n"
+        "- The chart is visually corrupted, nonsensical, empty, or does not appear to convey data.\n"
+        "- The layout or scaling makes the data misleading or unreadable.\n"
+        "\n"
+        "Do NOT reject charts for minor stylistic issues, small imperfections, suboptimal design choices, or changes that would only slightly improve the chart.\n"
+        "Do NOT suggest changing the chart type.\n"
+        "Do NOT nitpick.\n"
+        "\n"
+        "Output requirements STRICT:\n"
+        "- Output only valid JSON.\n"
+        "- Use exactly these keys:\n"
+        "  - accept: true or false, whether the chart should be accepted into the dataset.\n"
+        "  - reason: a concise string explaining the reason for rejection. If accept is true, use an empty string.\n"
+        "\n"
+        "Rules:\n"
+        "- If the chart is usable, return: {\"accept\": true, \"reason\": \"\"}\n"
+        "- If the chart is not usable, return: {\"accept\": false, \"reason\": \"brief reason for rejection\"}\n"
+        "- The reason should only describe severe readability, coherence, or usability issues.\n"
+        "- Do not include positive feedback.\n"
+        "- Do not include minor issues.\n"
+        "- Do not include explanations outside the JSON.\n"
+    )
+
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    # Multimodal message (works with LangChain OpenAI-compatible chat models that support vision)
+    msg = HumanMessage(
+        content=[
+            {"type": "text", "text": reject_prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+        ]
+    )
+
+    resp = llm.invoke([msg])
+
+    out = resp.content
+    _, out = after_think(out)
+
+    feedback = json.loads(out.replace("```json", "").replace("```", ""))
+
+    return feedback
+
+def describe_graph_png(llm, png_path, plot_code, graph_data, graph_df, dataset_desc, plot_description) -> str: # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
     generate a longer, detailed description for the graph.
@@ -687,18 +561,20 @@ def describe_graph_png(png_path, plot_code, graph_data, graph_df, dataset_desc, 
         ]
     )
 
-    resp = llm_think.invoke([msg]).content
+    resp = llm.invoke([msg]).content
 
     _, out = after_think(resp)
 
     return out
 
-def generate_graph_questions(png_path, dataset_desc, plot_desc, graph_data) -> list[dict]:
+def generate_graph_questions(llm, png_path, dataset_desc, plot_desc, graph_data, num) -> list[dict]:  # Reasoning
     """
     Calls LLM -> given the image, dataset desctiption, metadata and full graph description,
     generate 20 question and answer pairs.
 
     """
+
+    #TODO: Implement variable questions
     
     qa_prompt = (
         "You are a chart QA generator.\n"
@@ -756,7 +632,7 @@ def generate_graph_questions(png_path, dataset_desc, plot_desc, graph_data) -> l
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
     ])
 
-    resp = llm_think.invoke([msg]).content
+    resp = llm.invoke([msg]).content
 
     _, out = after_think(resp)
 
@@ -764,7 +640,7 @@ def generate_graph_questions(png_path, dataset_desc, plot_desc, graph_data) -> l
     end = out.rfind("]")
     return json.loads(out[start:end+1])
 
-def give_question_types(questions):
+def give_question_types(llm, questions): # No reasoning
     """
     Calls LLM -> categorizes questions into types, for better evaluation.
 
@@ -794,301 +670,3 @@ def give_question_types(questions):
     out = json.loads(out.replace("```json", "").replace("```", ""))
 
     return out
-
-if __name__ == "__main__": 
-    # Get ID of slurm job and the PID to determine the seed, not necessarly unique in every case but good for our case.
-    job_id = int(os.getenv("SLURM_JOB_ID", 1)) 
-    pid = os.getpid()
-    
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--metadata_file", type=str, required=False, default="") # Name of the output file in the dataset folder. If you're parallelizing should be left blank.
-    parser.add_argument("--start_index",  type=int, required=False, default=0) # Starting index of the output image.
-    parser.add_argument("--datasets", type=int, required=False, default=10) # For how many datasets to generate the image.
-    parser.add_argument("--regenerate", action="store_true", default=False) # Whether to iteratively refine graphs.
-    parser.add_argument("--seed", type=int, required=False, default=((job_id * pid) % 60000)) # The seed for random dataset selection
-    parser.add_argument("--run_id", type=int, required=True, default=0) # ID of the run, this is used if youre generating many graphs in parallel, so images don't overwrite themselves.
-
-    args = parser.parse_args()
-
-    print(job_id, pid, args.run_id)
-
-    job_id = f"{job_id}_{args.run_id}"
-
-    print(f"JOB ID: {job_id}")
-
-    if args.metadata_file == "":
-        args.metadata_file = f"metadata{job_id}.jsonl"
-
-    # MAIN_DIR is set to the git repository folder
-    MAIN_DIR = Path(__file__).resolve().parent
-
-    DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
-    IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
-    GENERATE_DS_IMAGES = args.datasets
-    FEEDBACK = args.regenerate
-
-    os.makedirs(DATASET_FOLDER, exist_ok=True)
-    os.makedirs(IMAGES_FOLDER, exist_ok=True)
-
-    # If start_index is -1 count files in folder and index from there.
-    # Probably better to use UUID for saving but impractical when reviewing the dataset.
-    if args.start_index == -1:
-        n_files = sum(
-            1 for f in os.listdir(IMAGES_FOLDER)
-            if os.path.isfile(os.path.join(IMAGES_FOLDER, f))
-        )
-    else:
-        n_files = args.start_index
-
-    rng = np.random.default_rng(args.seed)
-
-    datasets_meta = openml_list_uci()
-   
-    index = n_files
-
-    print("Start generation...")
-
-    while index < GENERATE_DS_IMAGES*10 + n_files:
-
-        # Randomlyselect a dataset
-        print(f"Fetching random dataset...")
-        while True:
-            try:
-                ds_id, df = get_random_ds(datasets_meta, rng) # Fetch random UCI dataset
-                dataset_sem = get_dataset_semantics(ds_id, sleep_s=1.0) # Get dataset semantics
-
-                if dataset_sem.get("features") == None:
-                    dataset_sem["features"] = ""
-
-                print("Getting usability...")
-                desc_dataset = determine_dataset_call(dataset_sem) # Determine if dataset is useful and format description
-
-                if not desc_dataset["useful"]:
-                    print(f"Dataset {ds_id} deemed not useful, picking another...")
-                    continue
-
-                break
-
-            except Exception as e:
-                print(f"Error fetching dataset, retrying... {e}")
-                continue
-
-        head_json = df.head(5).to_dict(orient="records")
-
-        # Replace the variables with more meaningful names. If it fails, keep previous names.
-        print("Replacing variables...")
-
-        new_names = replace_vars_call(dataset_sem.get("features"), dataset_sem["description"])
-
-        try:
-            old_names = list(df.columns)
-            df.columns = new_names
-
-            for old, new in zip(old_names, new_names):
-                dataset_sem["description"] = dataset_sem["description"].replace(old, new)
-                dataset_sem["features"] = json.loads(json.dumps(dataset_sem["features"]).replace(old, new))
-            
-        except Exception as e:
-            print(f"Couldn't replace variable names... {e}")
-
-        head_json = df.head(5).to_dict(orient="records")
-
-        # Generate graph specifications
-        print(f"Generating graph types for dataset {ds_id}...")
-        retr = 0
-        while retr < 3:
-            try:
-                graph_types = graphs_call(json.dumps(head_json), dataset_sem["description"])
-
-                templates = plt.style.available
-                for i, t in enumerate(graph_types):
-                    graph_types[i]["style"] = rng.choice(templates)
-
-                break
-            
-            except Exception as e:
-                retr+=1
-                print(f"Error generating graph types, retrying ({retr}) with dataset {ds_id}... {e}")
-                continue
-
-        if retr >= 3:
-            continue
-
-        # Generate and render graphs
-        i = 0
-        rerun = 0
-
-        # Iterate over all the generated specifications
-        while i < len(graph_types):
-            time_start = time.perf_counter()
-
-            # If errors occur too many times we skip the graph.
-            if rerun > 2:
-                rerun = 0
-                i += 1
-                continue
-
-            # Reset matplotlib params just in case.
-            matplotlib.rcParams.update(matplotlib.rcParamsDefault)
-            plt.style.use("default")
-
-            print(f"Generating graph {i+1}/{len(graph_types)} for dataset {ds_id}..., image id: {job_id}_{index}")
-            graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it0.png")
-            selected_plot = graph_types[i]
-            try:
-                imgs = []
-                #instruct = compute_info_call(dataset_sem.get("features"), graph_types[i], json.dumps(head_json))
-
-                plt.style.use(selected_plot["style"])
-                code = graph_call(dataset_sem.get("features"), graph_types[i], json.dumps(head_json))
-
-                # Execute plotting code.
-                exec_ns = {
-                    "df": df,
-                    "selected_plot": selected_plot,
-                    "graph_file_path": graph_file_path,
-                    "__builtins__": __builtins__,
-                }   
-
-                exec(code, exec_ns, exec_ns)
-
-                # Store the variables created in the plotting code
-                graph_data = exec_ns.get("graph_data", None)
-                graph_df   = exec_ns.get("graph_df", None)
-
-                if not os.path.exists(graph_file_path):
-                    raise ValueError("Generated code did not save image")
-                
-                # check the graph, give feedback and regenerate if needed
-                if FEEDBACK:
-                    regen_count = 0
-                    img_count = 0
-                    while True:
-                        try:
-                            try:
-                                feedback = check_call(graph_file_path, code)
-                            except:
-                                # Stop checking just in case image doesn't exist. This will lead to error downstream and start the graph from scratch.
-                                print("Couldn't find image")
-                                break
-                            
-                            # Append current image
-                            imgs.append({ 
-                                "path": os.path.relpath(graph_file_path, DATASET_FOLDER), 
-                                "feedback": feedback["feedback"], 
-                                "code": code
-                            })
-
-                            # Regenerate the image
-                            if feedback["correction"] and regen_count < 3:
-                                print(f"Graph {i+1} needs correction, regenerating ({regen_count})... Time: {(time.perf_counter() - time_start):.04f}")
-                                
-                                graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it{img_count + 1}.png")
-
-                                code_new = recode_call(dataset_sem.get("features"), graph_types[i], code, feedback["feedback"], json.dumps(head_json))
-
-                                # Close previous plots just in case
-                                plt.close("all")
-
-                                # Execute code, same as before
-                                exec_ns = {
-                                    "df": df,
-                                    "selected_plot": selected_plot,
-                                    "graph_file_path": graph_file_path,
-                                    "__builtins__": __builtins__,
-                                }
-
-                                exec(code_new, exec_ns, exec_ns)
-
-                                graph_data = exec_ns.get("graph_data", None)
-                                graph_df   = exec_ns.get("graph_df", None)
-
-                                if not os.path.exists(graph_file_path):
-                                    raise ValueError("Generated code did not save image")
-                                
-                                code = code_new
-
-                                regen_count += 1
-                                img_count += 1
-
-                        except Exception as e:
-                            print(f"Error during graph checking, retrying... {e}")
-                            graph_file_path = os.path.join(IMAGES_FOLDER, f"{job_id}_{index}_it{img_count}.png") # We set this to the latest available image to use in description generation and questions
-                            
-                            regen_count += 1
-                            continue
-                else:
-                    # If we don't want regeneration, we just store some feedback and push image to array.
-                    feedback = check_call(graph_file_path, code)
-
-                    imgs.append({ 
-                        "path":os.path.relpath(graph_file_path, DATASET_FOLDER), 
-                        "feedback": feedback["feedback"],
-                        "code": code
-                    })
-
-                # Generate graph description ang question and answer pairs.
-                graph_data = graph_data  # from executed code   
-                graph_df = graph_df  # from executed code
-                final_img_path = os.path.join(DATASET_FOLDER, imgs[-1]["path"])
-
-                print(f"Generating description... Time: {(time.perf_counter() - time_start):.04f}")
-
-                description = describe_graph_png(final_img_path, code, graph_data, graph_df, desc_dataset["description"], graph_types[i]["description"])
-
-                print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}")
-
-                questions = generate_graph_questions(final_img_path, desc_dataset["description"], description, graph_data)
-
-                # Label the generated questions.
-                print(f"Labeling questions")
-
-                try:
-                    rerun_labels = 0
-                    labels = []
-                    while len(labels) != len(questions):
-                        labels = give_question_types(questions)
-                        rerun_labels += 1
-                        if rerun_labels > 30:
-                            for l, q in enumerate(questions):
-                                questions[l]["type"] = None
-                            break
-
-                    for l, q in enumerate(questions):
-                        questions[l]["type"] = labels[l]
-
-                except Exception as e:
-                    print("Couldnt generate question types", e)
-
-                # Save the graph to the metadata.jsonl file.
-                with open(os.path.join(DATASET_FOLDER, args.metadata_file), "a", encoding="utf-8") as f:
-                    obj = {
-                        "id": str(uuid.uuid4()),
-                        "dataset": {
-                            "id": ds_id,
-                            "description": desc_dataset["description"],
-                        },
-                        "graph":{
-                            "type": graph_types[i]["type"],
-                            "style": graph_types[i]["style"],
-                            "full_description": description,
-                            "short_description": graph_types[i]["description"],
-                            "code": code,
-                            "structured_data": graph_data,
-                            "questions": questions
-                        },
-                        "images": imgs
-                    }
-                    f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                
-                index += 1
-                i += 1
-                rerun = 0
-
-                print(f"Finished graph... Time: {(time.perf_counter() - time_start):.04f}")
-
-            except Exception as e:
-                print(f"Error generating graph, retrying... {e}")
-                rerun += 1
-                continue
