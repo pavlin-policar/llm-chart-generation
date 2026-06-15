@@ -56,7 +56,8 @@
       "parameters": {
         "reasoning": true,
         "tools": false,
-        "num_questions": 20
+        "num_questions": 20,
+        "one": true
       }
     },
     "question_labeling": {}

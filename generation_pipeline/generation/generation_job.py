@@ -12,6 +12,7 @@ from calls import (
     check_call,
     describe_graph_png,
     determine_dataset_call,
+    generate_graph_question_one,
     generate_graph_questions,
     give_question_types,
     graph_call,
@@ -506,21 +507,37 @@ def generate_graph(
 
         print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}")
         questions_llm = select_llm(stages, "questions", llm, llm_think)
-        num_questions = stage_parameter(
-            stages,
-            "questions",
-            "num_questions",
-        )
-        questions = generate_graph_questions(
-            questions_llm,
-            final_img_path,
-            dataset_description["description"],
-            description,
-            graph_data,
-            num_questions,
-            graph_df=graph_df,
-            use_tools=stage_uses_tools(stages, "questions"),
-        )
+        num_questions = stage_parameter(stages, "questions", "num_questions")
+        one_by_one = stages["questions"].get("parameters", {}).get("one", False)
+
+        if one_by_one:
+            questions = []
+            for _ in range(num_questions):
+                quest = generate_graph_question_one(
+                    questions_llm,
+                    final_img_path,
+                    dataset_description["description"],
+                    description,
+                    graph_data,
+                    questions,
+                    graph_df=graph_df,
+                    use_tools=stage_uses_tools(stages, "questions"),
+                )
+
+                questions.append(quest)
+
+        else:
+            questions = generate_graph_questions(
+                questions_llm,
+                final_img_path,
+                dataset_description["description"],
+                description,
+                graph_data,
+                num_questions,
+                graph_df=graph_df,
+                use_tools=stage_uses_tools(stages, "questions"),
+            )
+
         label_questions(questions, stages, llm, llm_think)
     else:
         print(f"Rejected graph {graph_file_path}... Time: {(time.perf_counter() - time_start):.04f}")

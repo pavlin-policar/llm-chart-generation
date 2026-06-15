@@ -1,12 +1,26 @@
-from langchain_core.messages import HumanMessage
+import base64
+import json
+from typing import Literal
 
+import numpy as np
 from helpers import after_think, strip_code_fences
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
 from tools import invoke_with_dataframe_tools
 
-import json
-import re
-import numpy as np
-import base64
+
+class GraphDescription(BaseModel):
+    description: str = Field(min_length=1)
+
+
+class GraphQuestion(BaseModel):
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    answer_basis: Literal["image", "both"]
+
+
+class GraphQuestions(BaseModel):
+    questions: list[GraphQuestion]
 
 
 def invoke_llm(llm, messages, df=None, use_tools=False):
@@ -14,9 +28,29 @@ def invoke_llm(llm, messages, df=None, use_tools=False):
         return invoke_with_dataframe_tools(llm, messages, df)
     return llm.invoke(messages)
 
-def determine_dataset_call(llm, metadata) -> dict: # No reasoning
+
+def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False):
+    if use_tools and df is not None:
+        response = invoke_with_dataframe_tools(
+            llm,
+            messages,
+            df,
+            response_format=schema,
+        )
+        parsed = response.additional_kwargs.get("parsed")
+        if parsed is None:
+            raise ValueError("Structured response was not returned")
+        return schema.model_validate(parsed)
+
+    return llm.with_structured_output(
+        schema,
+        method="json_schema",
+    ).invoke(messages)
+
+
+def determine_dataset_call(llm, metadata) -> dict:  # No reasoning
     """
-    Calls LLM -> tells us whether the datataset is useful for creating visualizations. 
+    Calls LLM -> tells us whether the datataset is useful for creating visualizations.
     It also formats the description.
     """
 
@@ -28,21 +62,22 @@ def determine_dataset_call(llm, metadata) -> dict: # No reasoning
         "- Parse the description of the dataset (remove the authors and other non data related information) and its features into a readable format (strictly a string)\n"
         "Output format (STRICT):\n"
         "- Return ONLY a valid JSON object with EXACTLY these keys:\n"
-        "  • \"useful\": true or false\n"
-        "  • \"description\": string (description of dataset)\n"
+        '  • "useful": true or false\n'
+        '  • "description": string (description of dataset)\n'
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
     out = llm.invoke(prompt).content
     _, out = after_think(out)
-    
+
     desc = json.loads(out.replace("```json", "").replace("```", ""))
 
     return desc
 
-def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> dict: # Reasoning
+
+def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> dict:  # Reasoning
     """
-    Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset. 
+    Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
     The specifications consist of graph type, short description, and features that should be used.
 
     LLM gets a random creativity rating that encourages it to produce more standard or more unusual graphs.
@@ -50,7 +85,7 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> di
 
     creat = np.random.beta(2, 4, size=1)[0]
 
-    #TODO: implement amount of graphs chosen based on dataset
+    # TODO: implement amount of graphs chosen based on dataset
 
     prompt = (
         "You are a data visualization expert.\n"
@@ -73,9 +108,9 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> di
         "Output format (STRICT):\n"
         "- Return ONLY a valid JSON array.\n"
         "- Each element must be a JSON object with EXACTLY these keys:\n"
-        "  • \"type\": string (name of the plot type)\n"
-        "  • \"features\": array of strings (feature names from the dataset used for this plot)\n"
-        "  • \"description\": somewhat detailed description of what the plot is supposed to show, both semantically and visually\n"
+        '  • "type": string (name of the plot type)\n'
+        '  • "features": array of strings (feature names from the dataset used for this plot)\n'
+        '  • "description": somewhat detailed description of what the plot is supposed to show, both semantically and visually\n'
         "- The listed features must exist in the provided FEATURES section.\n"
         "- Use all feature names EXACTLY as given.\n"
         "- No additional keys, comments, or text.\n\n"
@@ -91,13 +126,14 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> di
 
     out = llm.invoke(prompt).content
     _, out = after_think(out)
-    out = out[out.find("["): out.rfind("]") + 1]
-    
+    out = out[out.find("[") : out.rfind("]") + 1]
+
     spec = json.loads(out)
 
     return spec
 
-def replace_vars_call(llm, features: dict, dataset_description: str) -> dict: # No reasoning
+
+def replace_vars_call(llm, features: dict, dataset_description: str) -> dict:  # No reasoning
     """
     Calls LLM -> replaces feature names in the dataset with a more semantically meaningful equaivalent.
     """
@@ -119,12 +155,13 @@ def replace_vars_call(llm, features: dict, dataset_description: str) -> dict: # 
 
     out = llm.invoke(prompt).content
     _, out = after_think(out)
-    
+
     desc = json.loads(out.replace("```json", "").replace("```", ""))
 
     return desc
 
-def compute_info_call(llm, features, selected_plot, head): # No reasoning
+
+def compute_info_call(llm, features, selected_plot, head):  # No reasoning
     """
     Calls LLM -> returns detailed instructions on how to make a specified plot.
 
@@ -169,6 +206,7 @@ def compute_info_call(llm, features, selected_plot, head): # No reasoning
 
     return out
 
+
 def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
@@ -179,7 +217,7 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
         "Output ONLY a single JSON object (no code, no extra text).\n"
         "JSON schema (all keys required):\n"
         "{\n"
-        "  \"notes\": string"
+        '  "notes": string'
         "}\n\n"
         "Rules:\n"
         "- Give the plotting agent some notes about how to proceed with the writing of the code and what to watch out for."
@@ -203,7 +241,7 @@ def graph_call(
     plan,
     df=None,
     use_tools=False,
-) -> str: # No reasoning plan, reasoning code
+) -> str:  # No reasoning plan, reasoning code
     """
     Calls LLM -> generates the code needed to plot the graph.
 
@@ -216,13 +254,13 @@ def graph_call(
         "1) A pandas DataFrame named `df`.\n"
         "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
         "selected_plot has exactly these keys:\n"
-        "  - \"type\": the required plot type to render\n"
-        "  - \"features\": the exact list of column names that must be used for the plot\n"
+        '  - "type": the required plot type to render\n'
+        '  - "features": the exact list of column names that must be used for the plot\n'
         "Your job:\n"
-        "- Render EXACTLY ONE plot whose plot type matches selected_plot[\"type\"].\n"
+        '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         "- Follow `plan` for x/y/hue/facet/aggregation/binning/filters/figsize/title.\n"
         "- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path', use this variable but don't change it.\n"
-        "- Use ONLY the columns listed in selected_plot[\"features\"].\n"
+        '- Use ONLY the columns listed in selected_plot["features"].\n'
         "- You may derive temporary helper columns ONLY from those listed features.\n\n"
         "Libraries:\n"
         "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. Do NOT use seaborn!\n"
@@ -231,30 +269,30 @@ def graph_call(
         "1) A pandas DataFrame named `graph_df` containing the FINAL PROCESSED DATA actually used for plotting.\n"
         "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
         "graph_data = {\n"
-        "  \"plot_type\": string,\n"
-        "  \"features_expected\": list[str],\n"
-        "  \"features_used\": list[str],\n"
-        "  \"derived_features\": list[str],\n"
-        "  \"x\": string or null or array of values if multiple subplots,\n"
-        "  \"y\": string or null or array of values if multiple subplots,\n"
-        "  \"hue\": string or null or array of values if multiple subplots,\n"
-        "  \"facet\": string or null,\n"
-        "  \"aggregation\": string or null or array of values if multiple subplots,\n"
-        "  \"binning\": string or null or array of values if multiple subplots,\n"
-        "  \"transformations\": list[str] or array of values if multiple subplots,\n"
-        "  \"filters\": list[str],\n"
-        "  \"n_rows_input\": int,\n"
-        "  \"n_rows_plotted\": int,\n"
-        "  \"title\": string\n"
+        '  "plot_type": string,\n'
+        '  "features_expected": list[str],\n'
+        '  "features_used": list[str],\n'
+        '  "derived_features": list[str],\n'
+        '  "x": string or null or array of values if multiple subplots,\n'
+        '  "y": string or null or array of values if multiple subplots,\n'
+        '  "hue": string or null or array of values if multiple subplots,\n'
+        '  "facet": string or null,\n'
+        '  "aggregation": string or null or array of values if multiple subplots,\n'
+        '  "binning": string or null or array of values if multiple subplots,\n'
+        '  "transformations": list[str] or array of values if multiple subplots,\n'
+        '  "filters": list[str],\n'
+        '  "n_rows_input": int,\n'
+        '  "n_rows_plotted": int,\n'
+        '  "title": string\n'
         "}\n\n"
         "Validation rules:\n"
         "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
         "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
-        "- If any feature in selected_plot[\"features\"] is missing from df.columns, pick a different plot approach\n"
-        "  that still matches selected_plot[\"type\"] but uses the remaining provided features only;\n"
-        "  ALWAYS keep graph_data[\"features_expected\"] unchanged.\n"
-        "- Do NOT change selected_plot[\"type\"].\n"
-        "- Do NOT use columns outside selected_plot[\"features\"].\n"
+        '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach\n'
+        '  that still matches selected_plot["type"] but uses the remaining provided features only;\n'
+        '  ALWAYS keep graph_data["features_expected"] unchanged.\n'
+        '- Do NOT change selected_plot["type"].\n'
+        '- Do NOT use columns outside selected_plot["features"].\n'
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Use large enough figures; use plt.tight_layout().\n\n"
@@ -262,7 +300,9 @@ def graph_call(
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
         f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n"
-        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n" if plan is not None else ""
+        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
+        if plan is not None
+        else ""
     )
 
     out = invoke_llm(llm, code_prompt, df, use_tools).content
@@ -274,7 +314,8 @@ def graph_call(
     code = strip_code_fences(out)
     return code
 
-def check_call(llm, image_path: str, plot_code: str) -> dict: # Reasoning
+
+def check_call(llm, image_path: str, plot_code: str) -> dict:  # Reasoning
     """
     Calls LLM -> checks the graph and produces feedback and tells us whether it needs to be regenerated.
 
@@ -335,6 +376,7 @@ def check_call(llm, image_path: str, plot_code: str) -> dict: # Reasoning
 
     return feedback
 
+
 def recode_call(
     llm,
     features,
@@ -343,7 +385,7 @@ def recode_call(
     corrections,
     df=None,
     use_tools=False,
-) -> dict: # Reasoning
+) -> dict:  # Reasoning
     """
     Calls LLM -> given the previous code and and the feedback, regenerate the code to hopefully fix the mistakes.
 
@@ -355,13 +397,13 @@ def recode_call(
         "1) A pandas DataFrame named `df`.\n"
         "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
         "selected_plot has exactly these keys:\n"
-        "  - \"type\": the required plot type to render\n"
-        "  - \"features\": the exact list of column names that must be used for the plot\n"
-        "  - \"style\": the matplotlib style to use for rendering\n\n"
+        '  - "type": the required plot type to render\n'
+        '  - "features": the exact list of column names that must be used for the plot\n'
+        '  - "style": the matplotlib style to use for rendering\n\n'
         "Your job:\n"
-        "- Render EXACTLY ONE plot whose plot type matches selected_plot[\"type\"].\n"
+        '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         f"- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path'\n"
-        "- Use ONLY the columns listed in selected_plot[\"features\"].\n"
+        '- Use ONLY the columns listed in selected_plot["features"].\n'
         "- You may derive temporary helper columns ONLY from those listed features "
         "(e.g., binning a numeric feature, extracting month from a datetime feature), "
         "but you must not use any other df columns.\n"
@@ -378,29 +420,29 @@ def recode_call(
         "   (after all filtering, aggregation, binning, and transformations).\n"
         "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
         "graph_data = {\n"
-        "  \"plot_type\": string,                     # must equal selected_plot[\"type\"]\n"
-        "  \"features_expected\": list[str],          # must equal selected_plot[\"features\"] exactly\n"
-        "  \"features_used\": list[str],              # columns actually used (include derived names if created)\n"
-        "  \"derived_features\": list[str],           # names of any derived helper columns you create\n"
-        "  \"x\": string or null,\n"
-        "  \"y\": string or null,\n"
-        "  \"hue\": string or null,\n"
-        "  \"facet\": string or null,\n"
-        "  \"aggregation\": string or null,\n"
-        "  \"binning\": string or null,\n"
-        "  \"transformations\": list[str],\n"
-        "  \"filters\": list[str],\n"
-        "  \"n_rows_input\": int,\n"
-        "  \"n_rows_plotted\": int,                   # MUST equal len(graph_df)\n"
-        "  \"title\": string\n"
+        '  "plot_type": string,                     # must equal selected_plot["type"]\n'
+        '  "features_expected": list[str],          # must equal selected_plot["features"] exactly\n'
+        '  "features_used": list[str],              # columns actually used (include derived names if created)\n'
+        '  "derived_features": list[str],           # names of any derived helper columns you create\n'
+        '  "x": string or null,\n'
+        '  "y": string or null,\n'
+        '  "hue": string or null,\n'
+        '  "facet": string or null,\n'
+        '  "aggregation": string or null,\n'
+        '  "binning": string or null,\n'
+        '  "transformations": list[str],\n'
+        '  "filters": list[str],\n'
+        '  "n_rows_input": int,\n'
+        '  "n_rows_plotted": int,                   # MUST equal len(graph_df)\n'
+        '  "title": string\n'
         "}\n\n"
         "Validation rules:\n"
         "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
         "- `graph_df` must reflect EXACTLY what is plotted (no extra rows or columns).\n"
-        "- If any feature in selected_plot[\"features\"] is missing from df.columns, pick a different plot approach "
-        "that still matches selected_plot[\"type\"] but uses the remaining provided features only; "
-        "ALWAYS keep graph_data[\"features_expected\"] unchanged.\n"
-        "- Do NOT use columns outside selected_plot[\"features\"].\n"
+        '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach '
+        'that still matches selected_plot["type"] but uses the remaining provided features only; '
+        'ALWAYS keep graph_data["features_expected"] unchanged.\n'
+        '- Do NOT use columns outside selected_plot["features"].\n'
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n\n"
         "Inputs you must rely on:\n"
@@ -416,6 +458,7 @@ def recode_call(
     code = out.replace("```python", "").replace("```", "")
 
     return code
+
 
 def rejection_call(llm, image_path: str) -> dict:
     """
@@ -461,8 +504,8 @@ def rejection_call(llm, image_path: str) -> dict:
         "  - reason: a concise string explaining the reason for rejection. If accept is true, use an empty string.\n"
         "\n"
         "Rules:\n"
-        "- If the chart is usable, return: {\"accept\": true, \"reason\": \"\"}\n"
-        "- If the chart is not usable, return: {\"accept\": false, \"reason\": \"brief reason for rejection\"}\n"
+        '- If the chart is usable, return: {"accept": true, "reason": ""}\n'
+        '- If the chart is not usable, return: {"accept": false, "reason": "brief reason for rejection"}\n'
         "- The reason should only describe severe readability, coherence, or usability issues.\n"
         "- Do not include positive feedback.\n"
         "- Do not include minor issues.\n"
@@ -489,6 +532,7 @@ def rejection_call(llm, image_path: str) -> dict:
 
     return feedback
 
+
 def describe_graph_png(
     llm,
     png_path,
@@ -498,7 +542,7 @@ def describe_graph_png(
     dataset_desc,
     plot_description,
     use_tools=False,
-) -> str: # Reasoning
+) -> str:  # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
     generate a longer, detailed description for the graph.
@@ -525,7 +569,7 @@ def describe_graph_png(
         "While the description should be detailed it should not be over around 2500 words.\n"
         "\n"
         "Output rules:\n"
-        "- Output ONLY plain text.\n"
+        "- Put the complete description in the `description` response field.\n"
         "- Use clear section headers exactly as provided below.\n"
         "- Be very detailed, but never invent values or categories.\n"
         "- When describing numeric ranges, counts, or extrema, compute them from `graph_df` (not from the image).\n"
@@ -541,7 +585,7 @@ def describe_graph_png(
         "\n"
         "Section requirements:\n"
         "1) Chart type and purpose\n"
-        "- State the chart type (must match graph_data[\"plot_type\"]).\n"
+        '- State the chart type (must match graph_data["plot_type"]).\n'
         "- Explain what question this chart helps answer, based on encodings and variables.\n"
         "- Explain the semantic meaning of the chart in the context of the dataset.\n"
         "- Explain what the chart entails in the context of the dataset.\n"
@@ -593,11 +637,15 @@ def describe_graph_png(
         ]
     )
 
-    resp = invoke_llm(llm, [msg], graph_df, use_tools).content
+    response = invoke_structured_llm(
+        llm,
+        [msg],
+        GraphDescription,
+        graph_df,
+        use_tools,
+    )
+    return response.description
 
-    _, out = after_think(resp)
-
-    return out
 
 def generate_graph_questions(
     llm,
@@ -615,8 +663,8 @@ def generate_graph_questions(
 
     """
 
-    #TODO: Implement variable questions
-    
+    # TODO: Implement variable questions
+
     qa_prompt = (
         "You are a chart QA generator.\n"
         "\n"
@@ -627,7 +675,7 @@ def generate_graph_questions(
         "4) Some structured data of the graph in graph_data. \n"
         "\n"
         "Task:\n"
-        "Generate EXACTLY 20 questions about the chart.\n"
+        f"Generate EXACTLY {num} questions about the chart.\n"
         "Include a mix of difficulties:\n"
         "- 7 easy (direct reading: titles, axes, legend, counts, obvious comparisons)\n"
         "- 6 medium (interpretation: comparisons across groups, trends, approximate ranges, notable patterns)\n"
@@ -643,12 +691,12 @@ def generate_graph_questions(
         "- While you can help yourself with the description to answer a question more accurately, do NOT ask questions about something that can't be answered ONLY from the image."
         "\n"
         "Output format (STRICT):\n"
-        "Return ONLY valid JSON: an array of exactly 20 objects.\n"
-        "Each object must have EXACTLY these keys:\n"
+        "Return the questions in the `questions` response field.\n"
+        "Each question must have EXACTLY these keys:\n"
         "{\n"
-        "  \"question\": string,\n"
-        "  \"answer\": string,             # must be concrete, not instructions\n"
-        "  \"answer_basis\": \"image\"|\"both\"  # where the answer comes from\n"
+        '  "question": string,\n'
+        '  "answer": string,             # must be concrete, not instructions\n'
+        '  "answer_basis": "image"|"both"  # where the answer comes from\n'
         "}\n"
         "\n"
         "Quality requirements:\n"
@@ -661,27 +709,102 @@ def generate_graph_questions(
         "- Do NOT include any extra text outside the JSON.\n"
     )
 
-
     with open(png_path, "rb") as f:
         png_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    msg = HumanMessage(content=[
-        {"type": "text", "text": qa_prompt},
-        {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
-        {"type": "text", "text": f"PLOT DESCRIPTION:\n{plot_desc}"},
-        {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
-    ])
+    msg = HumanMessage(
+        content=[
+            {"type": "text", "text": qa_prompt},
+            {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
+            {"type": "text", "text": f"PLOT DESCRIPTION:\n{plot_desc}"},
+            {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+        ]
+    )
 
-    resp = invoke_llm(llm, [msg], graph_df, use_tools).content
+    response = invoke_structured_llm(
+        llm,
+        [msg],
+        GraphQuestions,
+        graph_df,
+        use_tools,
+    )
+    if len(response.questions) != num:
+        raise ValueError(f"Expected {num} questions, received {len(response.questions)}")
+    return [question.model_dump() for question in response.questions]
 
-    _, out = after_think(resp)
 
-    start = out.find("[")
-    end = out.rfind("]")
-    return json.loads(out[start:end+1])
+def generate_graph_question_one(
+    llm,
+    png_path,
+    dataset_desc,
+    plot_desc,
+    graph_data,
+    previous_questions,
+    graph_df=None,
+    use_tools=False,
+) -> dict:
+    """Generate one chart question using all previous questions as context."""
 
-def give_question_types(llm, questions): # No reasoning
+    # TODO: No access to previous questions option
+
+    prompt = (
+        "You are a chart QA generator.\n"
+        "Generate EXACTLY ONE new question and answer about the chart.\n"
+        "The question must be definitively answerable from the chart and the "
+        "provided context, with a single checkable answer.\n"
+        "Do not repeat or closely paraphrase any previous question.\n"
+        "Prefer asking about a different visual element, relationship, or reasoning pattern than the previous questions.\n"
+        "Return one response object with EXACTLY these fields:\n"
+        "{\n"
+        '  "question": string,\n'
+        '  "answer": string,             # must be concrete, not instructions\n'
+        '  "answer_basis": "image"|"both"  # where the answer comes from\n'
+        "}\n"
+        "Quality requirements:\n"
+        "- Questions should cover BOTH:\n"
+        "  (a) chart mechanics/visual properties (axes, legend, encodings, layout), and\n"
+        "  (b) semantics in dataset context (what variables represent, what patterns mean).\n"
+        "- Do not repeat the same question pattern; vary them.\n"
+        "- Questions should be related to the graph and the data in the graph, do NOT ask general questions about the dataset that do not directly relate to the chart.\n"
+        "- Do NOT ask questions like how many rows are in the data or how many rows were left out, unless that is specified on the image itself.\n"
+        "- Do NOT include any extra text outside the JSON.\n"
+    )
+
+    with open(png_path, "rb") as file:
+        png_b64 = base64.b64encode(file.read()).decode("utf-8")
+
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": prompt},
+            {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
+            {"type": "text", "text": f"PLOT DESCRIPTION:\n{plot_desc}"},
+            {
+                "type": "text",
+                "text": (f"GRAPH DATA:\n{json.dumps(graph_data, ensure_ascii=False)}"),
+            },
+            {
+                "type": "text",
+                "text": (f"PREVIOUS QUESTIONS:\n{json.dumps(previous_questions, ensure_ascii=False)}"),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{png_b64}"},
+            },
+        ]
+    )
+
+    response = invoke_structured_llm(
+        llm,
+        [message],
+        GraphQuestion,
+        graph_df,
+        use_tools,
+    )
+    return response.model_dump()
+
+
+def give_question_types(llm, questions):  # No reasoning
     """
     Calls LLM -> categorizes questions into types, for better evaluation.
 
@@ -702,7 +825,6 @@ def give_question_types(llm, questions): # No reasoning
         "   - You must give each question EXACTLY ONE label.\n\n"
         "Questions:\n"
         f"{json.dumps(questions, indent=2)}"
-    
     )
 
     out = llm.invoke(prompt).content
