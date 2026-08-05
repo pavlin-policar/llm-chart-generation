@@ -11,7 +11,8 @@ import numpy as np
 from calls import (
     check_call,
     describe_graph_png,
-    determine_dataset_call,
+    determine_dataset_usability_call,
+    format_dataset_description_call,
     generate_graph_question_one,
     generate_graph_questions,
     give_question_types,
@@ -21,13 +22,25 @@ from calls import (
     recode_call,
     rejection_call,
     replace_vars_call,
+    graph_evaluation_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
 
-API_URL = "http://localhost:8888/v1"
+API_URL = "http://ixb2:8000/v1"
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
+ERROR_PATH = None
+CURRENT_STAGE = None
+
+
+def log_error(stage, error):
+    if ERROR_PATH is not None:
+        with open(ERROR_PATH, "a", encoding="utf-8") as file:
+            file.write(json.dumps({
+                "stage": stage,
+                "error": f"{type(error).__name__}: {error}",
+            }, ensure_ascii=False) + "\n")
 
 
 def define_llm_clients():
@@ -64,7 +77,7 @@ def parse_args(default_seed):
     parser.add_argument(
         "--parameters_file",
         type=str,
-        default="parameters.json",
+        default="default_parameters.json",
         help="Pipeline parameters file inside generation/configs.",
     )
     parser.add_argument(
@@ -90,6 +103,11 @@ def parse_args(default_seed):
         type=int,
         required=True,
         help="Run ID used to avoid filename collisions in parallel jobs.",
+    )
+    parser.add_argument(
+        "--fixed_datasets",
+        action="store_true",
+        help="Use datasets from the configs/good_datasets.jsonl file",
     )
     return parser.parse_args()
 
@@ -121,13 +139,13 @@ def replace_variables(llm, dataset_sem, df):
     print("Replacing variables...")
 
     old_names = list(df.columns)
-    new_names = replace_vars_call(
-        llm,
-        dataset_sem.get("features"),
-        dataset_sem["description"],
-    )
-
     try:
+        new_names = replace_vars_call(
+            llm,
+            dataset_sem.get("features"),
+            dataset_sem["description"],
+        )
+
         if len(new_names) != len(old_names):
             raise ValueError("Replacement feature count does not match the dataset")
 
@@ -138,6 +156,7 @@ def replace_variables(llm, dataset_sem, df):
             dataset_sem["features"] = json.loads(features_json)
     except Exception as error:
         df.columns = old_names
+        log_error("variable_replacement", error)
         print(f"Couldn't replace variable names... {error}")
         return None, old_names
 
@@ -148,20 +167,28 @@ def get_start_index(start_index, images_folder):
     if start_index != -1:
         return start_index
 
-    return sum(1 for file_name in os.listdir(images_folder) if os.path.isfile(os.path.join(images_folder, file_name)))
+    return sum(
+        1
+        for file_name in os.listdir(images_folder)
+        if file_name.endswith("_it0.png")
+    )
 
 
-def select_dataset(datasets_meta, rng, stages, llm, llm_think):
+def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None):
     while True:
         try:
             print("Fetching random dataset...")
-            dataset_id, df = get_random_ds(datasets_meta, rng)
+
+            dataset_id, df = get_random_ds(datasets_meta, rng, preselect_id)
+
             dataset_sem = get_dataset_semantics(dataset_id, sleep_s=1.0)
 
             if dataset_sem.get("features") is None:
                 dataset_sem["features"] = ""
+            
+            usable = True
 
-            if stage_is_active(stages, "dataset_usability"):
+            if stage_is_active(stages, "dataset_usability") and preselect_id is None:
                 print("Getting usability...")
                 usability_llm = select_llm(
                     stages,
@@ -169,23 +196,50 @@ def select_dataset(datasets_meta, rng, stages, llm, llm_think):
                     llm,
                     llm_think,
                 )
-                dataset_description = determine_dataset_call(
+
+                usability = determine_dataset_usability_call(
                     usability_llm,
                     dataset_sem,
                 )
-                if not dataset_description["useful"]:
+
+                usable = usability["useful"]
+
+                if not usable:
                     print(f"Dataset {dataset_id} deemed not useful, picking another...")
                     continue
-            else:
-                print("Skipping usability check")
-                dataset_description = {
-                    "useful": True,
-                    "description": dataset_sem.get("description", ""),
-                }
 
-            return dataset_id, df, dataset_sem, dataset_description
+            else:
+                print("Skipping usability check.")
+
+            
+            if stage_is_active(stages, "format_description"):
+                description_llm = select_llm(
+                    stages,
+                    "format_description",
+                    llm,
+                    llm_think,
+                )
+
+                description = format_dataset_description_call(
+                    description_llm,
+                    dataset_sem,
+                )["description"]
+
+                dataset_sem["description"] = description
+
+            else:
+                print("Skipping description formatting.")
+
+            return dataset_id, df, dataset_sem
         except Exception as error:
-            print(f"Error fetching dataset, retrying... {error}")
+            log_error("dataset_selection", error)
+            print(f"Error fetching dataset... {error}")
+
+            # If we are fixing the dataset go to the next one if it can't be found
+            if preselect_id is not None:
+                return None, None, None
+
+            print("Retrying with another random dataset...")
 
 
 def generate_graph_types(
@@ -224,6 +278,7 @@ def generate_graph_types(
                 graph_type["style"] = rng.choice(plt.style.available)
             return graph_types
         except Exception as error:
+            log_error("graph_types_generation", error)
             print(f"Error generating graph types, retrying ({retry}) with dataset {dataset_id}... {error}")
 
     return None
@@ -265,26 +320,75 @@ def review_and_regenerate(
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
     regeneration_active = stage_is_active(stages, "code_regeneration")
-    max_iterations = stage_parameter(stages, "code_regeneration", "iterations") if regeneration_active else 0
+    max_iterations = (
+        stage_parameter(stages, "code_regeneration", "iterations")
+        if regeneration_active
+        else 0
+    )
 
     graph_data = None
     graph_df = None
     iteration = 0
+    feedback_text = None
+
+    skip_evaluation = False
+    last_valid_code = code
+
 
     while True:
-        feedback = check_call(feedback_llm, graph_file_path, code)
-        images.append(
-            {
-                "path": os.path.relpath(graph_file_path, dataset_folder),
-                "feedback": feedback["feedback"],
-                "code": code,
-            }
-        )
+        previous_graph_file_path = graph_file_path
+        
+        if not skip_evaluation:
+            try:
+                feedback = graph_evaluation_call(
+                    feedback_llm,
+                    graph_file_path,
+                    code,
+                )
 
-        if not feedback["correction"] or iteration >= max_iterations:
-            break
+                feedback_text = feedback["feedback"]
+
+                images.append(
+                    {
+                        "path": os.path.relpath(
+                            graph_file_path,
+                            dataset_folder,
+                        ),
+                        "feedback": feedback_text,
+                        "accept": feedback["accept"],
+                        "code": code,
+                    }
+                )
+
+                if feedback["accept"] or iteration >= max_iterations:
+                    break
+
+            except Exception as error:
+                log_error("graph_evaluation", error)
+                feedback_text = (
+                    f"Graph evaluation failed with "
+                    f"{type(error).__name__}: {error}"
+                )
+
+                images.append(
+                    {
+                        "path": os.path.relpath(
+                            graph_file_path,
+                            dataset_folder,
+                        ),
+                        "feedback": feedback_text,
+                        "accept": False,
+                        "code": code,
+                    }
+                )
+
+                if iteration >= max_iterations:
+                    break
+        else:
+            skip_evaluation = False
 
         iteration += 1
+
         print(
             f"Graph {graph_number}/{graph_count} needs correction, "
             f"regenerating ({iteration})... "
@@ -292,29 +396,78 @@ def review_and_regenerate(
         )
 
         graph_file_path = f"{image_prefix}_it{iteration}.png"
-        recode_llm = select_llm(
-            stages,
-            "code_regeneration",
-            llm,
-            llm_think,
-        )
-        code = recode_call(
-            recode_llm,
-            dataset_sem.get("features"),
-            selected_plot,
-            code,
-            feedback["feedback"],
-            df=df,
-            use_tools=stage_uses_tools(stages, "code_regeneration"),
-        )
 
-        plt.close("all")
-        graph_data, graph_df = execute_graph_code(
-            code,
-            df,
-            selected_plot,
-            graph_file_path,
-        )
+        try:
+            recode_llm = select_llm(
+                stages,
+                "code_regeneration",
+                llm,
+                llm_think,
+            )
+
+            code = recode_call(
+                recode_llm,
+                dataset_sem.get("features"),
+                selected_plot,
+                code,
+                feedback_text,
+                df=df,
+                use_tools=stage_uses_tools(
+                    stages,
+                    "code_regeneration",
+                ),
+            )
+
+            plt.close("all")
+
+            graph_data, graph_df = execute_graph_code(
+                code,
+                df,
+                selected_plot,
+                graph_file_path,
+            )
+
+            last_valid_code = code
+
+        except Exception as error:
+            plt.close("all")
+            log_error("code_regeneration", error)
+
+            feedback_text = (
+                "The regenerated graph code failed during execution. "
+                "Fix the following error:\n"
+                f"{type(error).__name__}: {error}"
+            )
+
+            print(
+                f"Graph {graph_number}/{graph_count} regeneration "
+                f"{iteration} failed: {error}"
+            )
+
+            # No new image was produced, so record this iteration using the
+            # last successfully created image and its matching code.
+            graph_file_path = previous_graph_file_path
+            images.append(
+                {
+                    "path": os.path.relpath(
+                        graph_file_path,
+                        dataset_folder,
+                    ),
+                    "feedback": feedback_text,
+                    "accept": False,
+                    "code": last_valid_code,
+                }
+            )
+
+            if iteration >= max_iterations:
+                # Do not return failed code paired with a valid older image.
+                code = last_valid_code
+                break
+
+            # The failed regeneration attempt has already been recorded.
+            # Skip evaluating the unchanged previous image again.
+            skip_evaluation = True
+            continue
 
     return code, graph_data, graph_df, graph_file_path, images
 
@@ -343,12 +496,13 @@ def label_questions(questions, stages, llm, llm_think):
         for question, label in zip(questions, labels):
             question["type"] = label
     except Exception as error:
+        log_error("question_labeling", error)
         print(f"Couldn't generate question types... {error}")
 
 
 def build_metadata(
     dataset_id,
-    dataset_description,
+    dataset_sem,
     old_names,
     new_names,
     selected_plot,
@@ -356,14 +510,16 @@ def build_metadata(
     code,
     graph_data,
     questions,
-    rejection_response,
     images,
+    image_id,
 ):
     return {
         "id": str(uuid.uuid4()),
+        "prefix_id": image_id,
+        "accepted": images[-1]["accept"],
         "dataset": {
             "id": dataset_id,
-            "description": dataset_description["description"],
+            "description": dataset_sem["description"],
             "old_feature_names": old_names,
             "feature_names": new_names,
         },
@@ -375,8 +531,6 @@ def build_metadata(
             "code": code,
             "structured_data": graph_data,
             "questions": questions,
-            "accepted": rejection_response["accept"],
-            "reason": (None if rejection_response["accept"] else rejection_response.get("reason", "")),
         },
         "images": images,
     }
@@ -388,7 +542,6 @@ def generate_graph(
     dataset_id,
     df,
     dataset_sem,
-    dataset_description,
     old_names,
     new_names,
     image_index,
@@ -399,9 +552,12 @@ def generate_graph(
     llm,
     llm_think,
 ):
+    global CURRENT_STAGE
+
     time_start = time.perf_counter()
     selected_plot = graph_types[graph_index]
-    image_prefix = os.path.join(images_folder, f"{job_id}_{image_index}")
+    image_id = f"{job_id}_{image_index}"
+    image_prefix = os.path.join(images_folder, image_id)
     graph_file_path = f"{image_prefix}_it0.png"
 
     print(f"Generating graph {graph_index + 1}/{len(graph_types)} for dataset {dataset_id}..., image id: {job_id}_{image_index}")
@@ -411,6 +567,7 @@ def generate_graph(
 
     plan = None
     if stage_is_active(stages, "plan_code_generation"):
+        CURRENT_STAGE = "plan_code_generation"
         plan_llm = select_llm(
             stages,
             "plan_code_generation",
@@ -425,6 +582,7 @@ def generate_graph(
             use_tools=stage_uses_tools(stages, "plan_code_generation"),
         )
 
+    CURRENT_STAGE = "code_generation"
     code_llm = select_llm(stages, "code_generation", llm, llm_think)
     code = graph_call(
         code_llm,
@@ -437,6 +595,7 @@ def generate_graph(
     )
 
     plt.style.use(selected_plot["style"])
+    CURRENT_STAGE = "code_execution"
     graph_data, graph_df = execute_graph_code(
         code,
         df,
@@ -444,49 +603,38 @@ def generate_graph(
         graph_file_path,
     )
 
-    if stage_is_active(stages, "feedback"):
-        (
-            code,
-            regenerated_data,
-            regenerated_df,
-            graph_file_path,
-            images,
-        ) = review_and_regenerate(
-            code,
-            df,
-            selected_plot,
-            dataset_sem,
-            graph_file_path,
-            image_prefix,
-            dataset_folder,
-            stages,
-            llm,
-            llm_think,
-            graph_index + 1,
-            len(graph_types),
-            time_start,
-        )
-        graph_data = regenerated_data or graph_data
-        graph_df = regenerated_df if regenerated_df is not None else graph_df
-    else:
-        images = [
-            {
-                "path": os.path.relpath(graph_file_path, dataset_folder),
-                "feedback": "",
-                "code": code,
-            }
-        ]
+    CURRENT_STAGE = "feedback"
+    (
+        code,
+        regenerated_data,
+        regenerated_df,
+        graph_file_path,
+        images,
+    ) = review_and_regenerate(
+        code,
+        df,
+        selected_plot,
+        dataset_sem,
+        graph_file_path,
+        image_prefix,
+        dataset_folder,
+        stages,
+        llm,
+        llm_think,
+        graph_index + 1,
+        len(graph_types),
+        time_start,
+    )
+    
+    graph_data = regenerated_data if regenerated_data is not None else graph_data
+    graph_df = regenerated_df if regenerated_df is not None else graph_df
 
     final_img_path = os.path.join(dataset_folder, images[-1]["path"])
-    try:
-        rejection_response = rejection_call(llm, final_img_path)
-    except Exception as error:
-        print(f"Error during rejection step... {error}")
-        rejection_response = {"accept": True, "reason": ""}
 
     description = None
     questions = None
-    if rejection_response.get("accept"):
+    if images[-1]["accept"]:
+        CURRENT_STAGE = "description"
         print(f"Generating description... Time: {(time.perf_counter() - time_start):.04f}")
         description_llm = select_llm(
             stages,
@@ -500,11 +648,12 @@ def generate_graph(
             code,
             graph_data,
             graph_df,
-            dataset_description["description"],
+            dataset_sem["description"],
             selected_plot["description"],
             use_tools=stage_uses_tools(stages, "description"),
         )
 
+        CURRENT_STAGE = "questions"
         print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}")
         questions_llm = select_llm(stages, "questions", llm, llm_think)
         num_questions = stage_parameter(stages, "questions", "num_questions")
@@ -516,7 +665,7 @@ def generate_graph(
                 quest = generate_graph_question_one(
                     questions_llm,
                     final_img_path,
-                    dataset_description["description"],
+                    dataset_sem["description"],
                     description,
                     graph_data,
                     questions,
@@ -530,7 +679,7 @@ def generate_graph(
             questions = generate_graph_questions(
                 questions_llm,
                 final_img_path,
-                dataset_description["description"],
+                dataset_sem["description"],
                 description,
                 graph_data,
                 num_questions,
@@ -538,14 +687,16 @@ def generate_graph(
                 use_tools=stage_uses_tools(stages, "questions"),
             )
 
+        CURRENT_STAGE = "question_labeling"
         label_questions(questions, stages, llm, llm_think)
     else:
         print(f"Rejected graph {graph_file_path}... Time: {(time.perf_counter() - time_start):.04f}")
 
     print(f"Finished graph... Time: {(time.perf_counter() - time_start):.04f}")
+    CURRENT_STAGE = "metadata"
     return build_metadata(
         dataset_id,
-        dataset_description,
+        dataset_sem,
         old_names,
         new_names,
         selected_plot,
@@ -553,8 +704,8 @@ def generate_graph(
         code,
         graph_data,
         questions,
-        rejection_response,
         images,
+        image_id
     )
 
 
@@ -563,15 +714,23 @@ def append_metadata(metadata_path, metadata):
         file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
 
 
-def run_generation(args, job_id, stages, llm, llm_think):
+def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
+    global ERROR_PATH
+
     main_dir = Path(__file__).resolve().parent.parent.parent
     dataset_folder = os.path.join(main_dir, "dataset")
+    images_folder = os.path.join(dataset_folder, "images")
+
+    config_name = Path(args.parameters_file).stem
+    dataset_folder = os.path.join(main_dir, "dataset", config_name)
     images_folder = os.path.join(dataset_folder, "images")
 
     os.makedirs(dataset_folder, exist_ok=True)
     os.makedirs(images_folder, exist_ok=True)
 
     metadata_path = os.path.join(dataset_folder, args.metadata_file)
+    error_file = args.metadata_file.replace("metadata", "error", 1)
+    ERROR_PATH = os.path.join(dataset_folder, error_file)
     start_index = get_start_index(args.start_index, images_folder)
     image_index = start_index
     graphs_per_dataset = stage_parameter(
@@ -583,14 +742,28 @@ def run_generation(args, job_id, stages, llm, llm_think):
     rng = np.random.default_rng(args.seed)
     datasets_meta = openml_list_uci()
 
+
+    datasets_iter = iter(dataset_ids or [])
+ 
     print("Start generation...")
     while image_index < target_index:
+        ds_id = None
+        if args.fixed_datasets:
+            try:
+                ds_id = next(datasets_iter)
+            except StopIteration:
+                print("No more fixed datasets available.")
+                break
+
         (
             dataset_id,
             df,
-            dataset_sem,
-            dataset_description,
-        ) = select_dataset(datasets_meta, rng, stages, llm, llm_think)
+            dataset_sem
+        ) = select_dataset(datasets_meta, rng, stages, llm, llm_think, ds_id)
+
+        if dataset_id is None and args.fixed_datasets:
+            print(f"Skipping fixed dataset {ds_id}.")
+            continue
 
         old_names = None
         new_names = list(df.columns)
@@ -631,7 +804,6 @@ def run_generation(args, job_id, stages, llm, llm_think):
                         dataset_id,
                         df,
                         dataset_sem,
-                        dataset_description,
                         old_names,
                         new_names,
                         image_index,
@@ -646,6 +818,7 @@ def run_generation(args, job_id, stages, llm, llm_think):
                     image_index += 1
                     break
                 except Exception as error:
+                    log_error(CURRENT_STAGE or "graph_generation", error)
                     print(f"Error generating graph, retrying ({retry}/{MAX_GRAPH_RETRIES})... {error}")
 
 
@@ -669,7 +842,21 @@ def main():
     )
     stages = load_pipeline(parameters_path)["stages"]
     llm, llm_think = define_llm_clients()
-    run_generation(args, job_id, stages, llm, llm_think)
+
+    datasets_good_file = os.path.join(main_dir, "generation_pipeline", "generation", "configs", "good_datasets.jsonl")
+    dataset_ids = None
+    if args.fixed_datasets:
+        dataset_ids = []
+        with open(datasets_good_file, "r", encoding="utf-8") as f:
+            for line in f:
+                dataset_ids.append(json.loads(line)["id"])
+
+        start = args.run_id * args.datasets
+        end = start + args.datasets
+
+        dataset_ids = dataset_ids[start:end]
+
+    run_generation(args, job_id, stages, llm, llm_think, dataset_ids)
 
 
 if __name__ == "__main__":

@@ -88,6 +88,8 @@ def pick_random_dataset_id(datasets, rng, min_instances=200, max_features=2000):
 
         if n >= min_instances and 1 <= p <= max_features:
             filtered.append(did)
+    
+    print("Filtered length:", len(filtered))
 
     if not filtered:
         raise RuntimeError("No datasets passed the filters. Relax constraints.")
@@ -127,14 +129,17 @@ def get_dataset_semantics(did, sleep_s=0.0):
         "features": features,
     }
 
-def get_random_ds(d_meta, rng):
+def get_random_ds(d_meta, rng, preselect_id=None):
     """
     Pick a random UCI dataset from metadata (list of dicts),
     ensure ARFF format, and load the data as a pandas DataFrame.
     """
 
     # Pick dataset id using existing helper
-    data_id = pick_random_dataset_id(d_meta, rng=rng)
+    if preselect_id is None:
+        data_id = pick_random_dataset_id(d_meta, rng=rng)
+    else:
+        data_id = preselect_id
 
     # Find corresponding metadata entry (d_meta is a list)
     meta = next(d for d in d_meta if int(d["did"]) == int(data_id))

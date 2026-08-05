@@ -48,32 +48,67 @@ def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False):
     ).invoke(messages)
 
 
-def determine_dataset_call(llm, metadata) -> dict:  # No reasoning
+def determine_dataset_usability_call(llm, metadata) -> dict:
     """
-    Calls LLM -> tells us whether the datataset is useful for creating visualizations.
-    It also formats the description.
+    Determines whether the dataset is suitable for generating meaningful
+    visualizations.
     """
 
     prompt = (
-        "You are a data expert.\n"
-        "You receive metadata about a dataset from OpenML in JSON format.\n\n"
-        "Tasks:\n"
-        "- Determine whether the dataset be used for generating visualizations which make semantic and visual sense, please be very strict here we do not want to generate semantically uninformative visuals.\n"
-        "- Parse the description of the dataset (remove the authors and other non data related information) and its features into a readable format (strictly a string)\n"
+        "You are a strict data visualization expert.\n"
+        "You receive metadata about an OpenML dataset in JSON format.\n\n"
+        "Task:\n"
+        "Determine whether the dataset can be used to generate visualizations "
+        "that are both semantically meaningful and visually informative.\n\n"
+        "Be strict. Reject datasets when:\n"
+        "- The feature meanings are unclear or anonymized.\n"
+        "- There are too few meaningful features.\n"
+        "- The metadata does not provide enough context to interpret the data.\n"
+        "- Any generated visualizations would likely be arbitrary or misleading.\n\n"
         "Output format (STRICT):\n"
-        "- Return ONLY a valid JSON object with EXACTLY these keys:\n"
-        '  • "useful": true or false\n'
-        '  • "description": string (description of dataset)\n'
+        "- Return ONLY a valid JSON object with EXACTLY this key:\n"
+        '  "useful": true or false\n\n'
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
     out = llm.invoke(prompt).content
     _, out = after_think(out)
 
-    desc = json.loads(out.replace("```json", "").replace("```", ""))
+    return json.loads(
+        out.replace("```json", "").replace("```", "").strip()
+    )
 
-    return desc
 
+def format_dataset_description_call(llm, metadata) -> dict:
+    """
+    Converts the dataset metadata into a clean, readable description.
+    """
+
+    prompt = (
+        "You are a data documentation expert.\n"
+        "You receive metadata about an OpenML dataset in JSON format.\n\n"
+        "Task:\n"
+        "Create a concise and readable description of the dataset and its "
+        "features.\n\n"
+        "Requirements:\n"
+        "- Describe what the dataset contains.\n"
+        "- Explain the meaning of its features when that information is available.\n"
+        "- Remove author names, citations, acknowledgements, download instructions, "
+        "and other information unrelated to the data itself.\n"
+        "- Do not invent information that is not present in the metadata.\n"
+        "- The description must be a single string.\n\n"
+        "Output format (STRICT):\n"
+        "- Return ONLY a valid JSON object with EXACTLY this key:\n"
+        '  "description": string\n\n'
+        f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
+    )
+
+    out = llm.invoke(prompt).content
+    _, out = after_think(out)
+
+    return json.loads(
+        out.replace("```json", "").replace("```", "").strip()
+    )
 
 def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> dict:  # Reasoning
     """
@@ -531,6 +566,170 @@ def rejection_call(llm, image_path: str) -> dict:
     feedback = json.loads(out.replace("```json", "").replace("```", ""))
 
     return feedback
+
+def graph_evaluation_call(
+    llm,
+    image_path: str,
+    plot_code: str,
+) -> dict:
+    """
+    Evaluates whether a graph is good enough for the final dataset.
+    If it is not, returns concrete feedback for the next regeneration.
+    """
+
+    evaluation_prompt = (
+        "You are a visualization QA reviewer.\n"
+        "\n"
+        "You will be given:\n"
+        "1) An IMAGE of a chart or plot.\n"
+        "2) The PYTHON CODE that generated the chart.\n"
+        "\n"
+        "Goal:\n"
+        "Decide whether the chart is readable, semantically coherent, and "
+        "informative enough to be accepted into a dataset as a valid "
+        "visualization of data.\n"
+        "\n"
+        "The image is the primary evidence. Use the code to understand which "
+        "variables, transformations, groupings, aggregations, filters, and "
+        "visual encodings produced the visible result and to propose a concrete "
+        "code-level correction when necessary.\n"
+        "\n"
+        "Be lenient about minor styling and aesthetics, but not about readability, "
+        "semantic validity, or informativeness. The chart does not need to be "
+        "beautiful, optimal, or publication-quality. However, it must communicate "
+        "a meaningful and interpretable relationship, distribution, comparison, "
+        "composition, or trend.\n"
+        "\n"
+        "The chart type was selected by an earlier workflow stage and must remain "
+        "fixed. Do not propose changing the chart type under any circumstances.\n"
+        "\n"
+        "However, still reject the chart if it is uninformative, semantically "
+        "invalid, misleading, or unreadable, including when the selected chart "
+        "type combined with the chosen variables or encoding produces an "
+        "uninformative result.\n"
+        "\n"
+        "When rejecting a chart, recommend only fixes that preserve the current "
+        "chart type. Possible fixes include changing variable assignment, "
+        "aggregation, grouping, filtering, binning, ordering, scaling, "
+        "normalization, labels, limits, sampling, or other code-level details.\n"
+        "\n"
+        "Evaluate the chart in two stages:\n"
+        "\n"
+        "1) SEMANTIC VALIDITY AND INFORMATIVENESS\n"
+        "\n"
+        "Reject the chart if it has a major semantic or informational problem, "
+        "including:\n"
+        "- The visualization is technically non-empty but communicates almost "
+        "no useful information.\n"
+        "- The variables are used in a semantically invalid, arbitrary, or "
+        "misleading way.\n"
+        "- Identifiers, row indices, arbitrary numeric codes, or similar fields "
+        "are treated as meaningful continuous measurements without a valid reason.\n"
+        "- Numeric values are treated as unordered categories, or categorical "
+        "codes are treated as meaningful numeric magnitudes, without a valid reason.\n"
+        "- The selected variables, grouping, aggregation, or encoding produce a "
+        "chart from which no meaningful interpretation can reasonably be made.\n"
+        "- An aggregation, grouping, filtering, or transformation removes the "
+        "important variation and leaves a trivial or misleading result.\n"
+        "- The chart contains only one meaningful group, one effective data point, "
+        "constant values, or nearly identical values, making the intended "
+        "comparison or pattern uninformative.\n"
+        "- Excessive category cardinality or excessive granularity makes the "
+        "visualization effectively uninterpretable.\n"
+        "- The axes, groups, title, legend, labels, or visual encodings imply a "
+        "meaning that is not supported by the data or code.\n"
+        "- The current chart is uninformative because its variables, aggregation, "
+        "grouping, ordering, scaling, or encoding obscure rather than communicate "
+        "the data.\n"
+        "- The chart is dominated by missing values, invalid values, artifacts, "
+        "or meaningless default values.\n"
+        "- Incorrect ordering, aggregation, normalization, scaling, or comparison "
+        "creates a misleading impression.\n"
+        "\n"
+        "Do not reject a chart merely because the relationship between variables "
+        "is weak or absent, the distribution is simple, or no dramatic pattern is "
+        "present. Real data may legitimately show little association.\n"
+        "\n"
+        "Reject only when the chart itself is semantically invalid, misleading, "
+        "trivial because of how it was constructed, or unable to support a "
+        "meaningful interpretation.\n"
+        "\n"
+        "2) READABILITY AND PRESENTATION\n"
+        "\n"
+        "Accept the chart only if:\n"
+        "- It clearly visualizes data.\n"
+        "- The main values, trends, distributions, patterns, or comparisons are "
+        "visible enough to interpret.\n"
+        "- Necessary labels, ticks, axes, titles, annotations, and legends are "
+        "readable.\n"
+        "- Categories, lines, bars, points, colors, markers, or other visual "
+        "elements are distinguishable enough.\n"
+        "- The chart can be interpreted correctly without serious difficulty.\n"
+        "\n"
+        "Reject the chart for serious presentation problems such as:\n"
+        "- Important text, tick labels, legends, annotations, or axis labels are "
+        "unreadable.\n"
+        "- Important chart elements are missing, clipped, or cut off.\n"
+        "- Overlap, clutter, or excessive density prevents interpretation.\n"
+        "- Categories, colors, lines, bars, points, or markers cannot be "
+        "distinguished.\n"
+        "- The chart is empty, corrupted, nonsensical, or fails to visibly convey "
+        "data.\n"
+        "- Scaling, limits, or layout hide important variation or make the chart "
+        "misleading or unreadable.\n"
+        "\n"
+        "Do not reject charts for minor stylistic issues or changes that would "
+        "only slightly improve their appearance. Do not nitpick.\n"
+        "\n"
+        "Do not change or recommend changing the chart type. If the chart is "
+        "uninformative, reject it and propose a concrete correction that keeps "
+        "the same chart type.\n"
+        "\n"
+        "Output requirements:\n"
+        "- Output only valid JSON.\n"
+        "- Use exactly these keys:\n"
+        "  - accept: true or false\n"
+        "  - feedback: a concise string\n"
+        "\n"
+        "Rules:\n"
+        '- If usable, return exactly: {"accept": true, "feedback": ""}\n'
+        "- If not usable, set accept to false and describe:\n"
+        "  1) the single most serious visible or semantic issue;\n"
+        "  2) a concrete fix that can be applied to the Python code while "
+        "preserving the current chart type.\n"
+        "- Feedback will be passed directly to a code-regeneration agent.\n"
+        "- Only include feedback for issues serious enough to prevent acceptance.\n"
+        "- Do NOT include positive feedback.\n"
+        "- Do NOT propose changing the chart type.\n"
+        "- Do NOT include explanations, Markdown, or text outside the JSON.\n"
+    )
+
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    msg = HumanMessage(
+        content=[
+            {"type": "text", "text": evaluation_prompt},
+            {"type": "text", "text": f"CODE:\n{plot_code}"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{img_b64}"
+                },
+            },
+        ]
+    )
+
+    resp = llm.invoke([msg])
+
+    out = resp.content
+    _, out = after_think(out)
+
+    result = json.loads(
+        out.replace("```json", "").replace("```", "").strip()
+    )
+
+    return result
 
 
 def describe_graph_png(

@@ -6,6 +6,12 @@
         "reasoning": false
       }
     },
+    "format_description": {
+      "active": true,
+      "parameters": {
+        "reasoning": false
+      }
+    },
     "variable_replacement": {
       "active": true,
       "parameters": {
@@ -42,7 +48,7 @@
       "active": true,
       "parameters": {
         "reasoning": true,
-        "iterations": 3,
+        "iterations": 5,
         "tools": false
       }
     },
@@ -57,7 +63,7 @@
         "reasoning": true,
         "tools": false,
         "num_questions": 20,
-        "one": true
+        "one": false
       }
     },
     "question_labeling": {}

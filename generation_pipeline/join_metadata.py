@@ -5,48 +5,52 @@ import os
 import re
 
 
-def resave_dataset(min_number=0, directory="./dataset", filename="metadata.jsonl"):
-    join_filepath = os.path.join(directory, filename)
+def join_files(current_directory, prefix):
+    output_filepath = os.path.join(current_directory, f"{prefix}.jsonl")
 
-    pattern = os.path.join(directory, "metadata*.jsonl")
-    regex = re.compile(r"metadata(\d{1}).jsonl$")
+    if os.path.exists(output_filepath):
+        print(f"Skipping {output_filepath}")
+        return
+
+    pattern = os.path.join(current_directory, f"{prefix}*.jsonl")
+    regex = re.compile(rf"^{prefix}\d+(?:_\d+)*\.jsonl$")
 
     matching_files = []
     for filepath in glob.glob(pattern):
-        filename = os.path.basename(filepath)
-        match = regex.match(filename)
+        current_filename = os.path.basename(filepath)
 
-        if match and int(match.group(1)) >= min_number:
+        if regex.match(current_filename):
             matching_files.append(filepath)
 
-    with open(join_filepath, "a", encoding="utf-8") as f_full:
+    if not matching_files:
+        return
+
+    with open(output_filepath, "w", encoding="utf-8") as f_full:
         for filepath in sorted(matching_files):
             with open(filepath, "r", encoding="utf-8") as f:
                 for line in f:
                     j = json.loads(line)
                     f_full.write(json.dumps(j, ensure_ascii=False) + "\n")
 
+    print(f"Created {output_filepath}")
+
+
+def resave_dataset(directory="./dataset"):
+    for current_directory, _, _ in os.walk(directory):
+        join_files(current_directory, "metadata")
+        join_files(current_directory, "error")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Join multiple metadata JSONL files into a single metadata.jsonl file.")
-    parser.add_argument(
-        "--min-number",
-        type=int,
-        default=0,
-        help="Minimum numeric suffix of metadata files to include (e.g. 0 for metadata0.jsonl and above).",
+    parser = argparse.ArgumentParser(
+        description="Join metadata and error JSONL files in all subdirectories."
     )
     parser.add_argument(
         "--directory",
         type=str,
         default="./dataset",
-        help="Directory containing metadata files.",
-    )
-    parser.add_argument(
-        "--filename",
-        type=str,
-        default="metadata.jsonl",
-        help="Output filename for the joined metadata.",
+        help="Directory containing dataset subdirectories.",
     )
 
     args = parser.parse_args()
-    resave_dataset(min_number=args.min_number, directory=args.directory, filename=args.filename)
+    resave_dataset(directory=args.directory)
