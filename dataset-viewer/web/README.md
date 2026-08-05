@@ -5,6 +5,16 @@ loads only the global manifest and chart index at startup, shows thumbnails
 from static URLs, and fetches one chart's metadata/results/images only when a
 chart detail page is opened.
 
+The grid and detail view display chart acceptance, the sidebar can filter by
+accepted or non-accepted charts, and each selected iteration shows its feedback
+directly above its code.
+
+The dataset metrics panel compares cumulative acceptance at each iteration and
+generation errors for every generation-dataset folder. They are displayed on a
+dedicated page opened from the sidebar and include iteration outputs per
+accepted chart. The values are stored in manifest schema version 5; regenerate
+the static bundle after changing metadata or error logs.
+
 The public deployment is available at
 <https://llm-chart-generation.streamlit.app>.
 
@@ -41,6 +51,15 @@ Generate the static bundle from the repository root:
   --clean
 ```
 
+Every folder containing `dataset/<name>/metadata.jsonl` is included, and the
+folder name becomes the generation-dataset name shown by the viewer. To build
+only selected folders, repeat `--generation-dataset`:
+
+```bash
+--generation-dataset config_no_think \
+--generation-dataset config_think_code_generation
+```
+
 The global grid order is randomly shuffled with fixed seed `42` by default, so
 the order is stable across deployments. Change the seed or disable shuffling:
 
@@ -68,19 +87,21 @@ llm-chart-generation/
 ├── manifest.json
 ├── charts.jsonl.gz
 ├── thumbnails/
-│   └── <dataset-id>/
-│       └── <chart-id>.jpg
+│   └── <generation-dataset>/
+│       └── <dataset-id>/
+│           └── <chart-id>.jpg
 ├── datasets/
 │   ├── <dataset-id>.json
 │   └── <dataset-id>.charts.jsonl
 └── charts/
-    └── <dataset-id>/
-        └── <chart-id>/
-            ├── manifest.json
-            ├── metadata.json
-            ├── results.jsonl.gz
-            └── images/
-                └── <iteration-image>.png
+    └── <generation-dataset>/
+        └── <dataset-id>/
+            └── <chart-id>/
+                ├── manifest.json
+                ├── metadata.json
+                ├── results.jsonl.gz
+                └── images/
+                    └── <iteration-image>.jpg
 ```
 
 Each chart directory is self-contained:
@@ -128,6 +149,6 @@ images/
    ```text
    https://file.biolab.si/llm-chart-generation/manifest.json
    https://file.biolab.si/llm-chart-generation/charts.jsonl.gz
-   https://file.biolab.si/llm-chart-generation/charts/<dataset-id>/<chart-id>/metadata.json
-   https://file.biolab.si/llm-chart-generation/charts/<dataset-id>/<chart-id>/results.jsonl.gz
+   https://file.biolab.si/llm-chart-generation/charts/<generation-dataset>/<dataset-id>/<chart-id>/metadata.json
+   https://file.biolab.si/llm-chart-generation/charts/<generation-dataset>/<dataset-id>/<chart-id>/results.jsonl.gz
    ```

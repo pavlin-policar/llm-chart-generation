@@ -169,37 +169,217 @@ def quality(record: dict[str, Any], max_rounds: int = 3) -> str:
     return "bad" if str(feedback).strip() else "good"
 
 
+def chart_accepted(record: dict[str, Any]) -> bool:
+    """Return the chart-level acceptance flag, with an iteration fallback."""
+    accepted = record.get("accepted")
+    if isinstance(accepted, bool):
+        return accepted
+    images = [
+        img for img in record.get("images", [])
+        if isinstance(img, dict) and isinstance(img.get("path"), str)
+    ]
+    if not images:
+        return False
+    return bool(max(images, key=lambda img: image_iteration(img["path"])).get("accept"))
+
+def read_error_counts(source_dir: Path) -> dict[str, int]:
+    """Load generation-stage error counts from JSON or JSONL error logs."""
+    counts: Counter = Counter()
+    error_file = next(
+        (
+            source_dir / name
+            for name in ("error.jsonl", "errors.jsonl", "error.json", "errors.json")
+            if (source_dir / name).is_file()
+        ),
+        None,
+    )
+    if error_file is None:
+        return {}
+
+    rows: list[dict[str, Any]] = []
+    if error_file.suffix == ".jsonl":
+        rows = [row for row in read_jsonl(error_file) if isinstance(row, dict)]
+    else:
+        try:
+            payload = json.loads(error_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {error_file}: {exc}") from exc
+        if isinstance(payload, list):
+            rows = [row for row in payload if isinstance(row, dict)]
+        elif isinstance(payload, dict):
+            nested = payload.get("errors")
+            rows = (
+                [row for row in nested if isinstance(row, dict)]
+                if isinstance(nested, list)
+                else [payload]
+            )
+
+    for row in rows:
+        stage = row.get("stage")
+        if stage:
+            counts[str(stage)] += 1
+    return dict(counts)
+
+
+def build_generation_metrics(
+    generation_name: str,
+    records: list[dict[str, Any]],
+    source_dir: Path,
+) -> dict[str, Any]:
+    """Compute cumulative acceptance and exact-denominator generation errors."""
+    chart_count = len(records)
+    image_lists = [
+        [img for img in (rec.get("images") or []) if isinstance(img, dict)]
+        for rec in records
+    ]
+    iteration_output_count = sum(len(images) for images in image_lists)
+    regeneration_attempt_count = max(iteration_output_count - chart_count, 0)
+    max_iteration_count = max((len(images) for images in image_lists), default=0)
+    accepted_iteration_outputs = 0
+    accepted_chart_count = 0
+    for rec, images in zip(records, image_lists):
+        first_acceptance = next(
+            (index for index, image in enumerate(images) if bool(image.get("accept"))),
+            None,
+        )
+        if first_acceptance is None and rec.get("accepted") is True and images:
+            first_acceptance = len(images) - 1
+        if first_acceptance is not None:
+            accepted_chart_count += 1
+            accepted_iteration_outputs += first_acceptance + 1
+
+
+    acceptance_by_iteration = []
+    for iteration in range(max_iteration_count):
+        accepted_count = 0
+        for rec, images in zip(records, image_lists):
+            accepted = any(bool(img.get("accept")) for img in images[: iteration + 1])
+            if (
+                not accepted
+                and rec.get("accepted") is True
+                and images
+                and iteration >= len(images) - 1
+            ):
+                accepted = True
+            accepted_count += int(accepted)
+        acceptance_by_iteration.append({
+            "iteration": iteration,
+            "accepted_count": accepted_count,
+            "denominator": chart_count,
+            "rate": (accepted_count / chart_count) if chart_count else None,
+        })
+
+    error_counts = read_error_counts(source_dir)
+    execution_errors = int(error_counts.get("code_execution", 0))
+    regeneration_errors = int(error_counts.get("code_regeneration", 0))
+    return {
+        "name": generation_name,
+        "chart_count": chart_count,
+        "iteration_output_count": iteration_output_count,
+        "regeneration_attempt_count": regeneration_attempt_count,
+        "accepted_chart_count": accepted_chart_count,
+        "accepted_iteration_output_count": accepted_iteration_outputs,
+        "iterations_per_accepted_chart": (
+            accepted_iteration_outputs / accepted_chart_count
+            if accepted_chart_count
+            else None
+        ),
+        "acceptance_by_iteration": acceptance_by_iteration,
+        "error_rates": {
+            "code_execution": {
+                "count": execution_errors,
+                "denominator": chart_count,
+                "rate": (execution_errors / chart_count) if chart_count else None,
+            },
+            "code_regeneration": {
+                "count": regeneration_errors,
+                "denominator": regeneration_attempt_count,
+                "rate": (
+                    regeneration_errors / regeneration_attempt_count
+                    if regeneration_attempt_count
+                    else None
+                ),
+            },
+        },
+    }
+
+
+
 def normalize_image_path(path_str: str) -> str:
     """Return chart-directory-relative image path."""
     return f"images/{Path(path_str).name}"
 
 
-def collect_metadata(metadata_file: Path) -> tuple[
+def discover_dataset_dirs(data_root: Path) -> dict[str, Path]:
+    """Find named dataset folders that contain a metadata.jsonl file."""
+    datasets_root = data_root / "dataset"
+    dataset_dirs: dict[str, Path] = {}
+
+    # Backward compatibility for bundles generated from the former flat layout.
+    if (datasets_root / "metadata.jsonl").is_file():
+        dataset_dirs[datasets_root.name] = datasets_root
+
+    if datasets_root.is_dir():
+        for child in sorted(datasets_root.iterdir(), key=lambda path: path.name.lower()):
+            if child.is_dir() and (child / "metadata.jsonl").is_file():
+                dataset_dirs[child.name] = child
+
+    if not dataset_dirs:
+        raise FileNotFoundError(
+            f"No dataset folders with metadata.jsonl found under {datasets_root}"
+        )
+    return dataset_dirs
+
+
+def collect_metadata(dataset_dirs: dict[str, Path]) -> tuple[
     list[dict[str, Any]],
     dict[str, list[dict[str, Any]]],
     dict[str, dict[str, Any]],
     dict[str, str],
+    dict[str, dict[str, Any]],
 ]:
     ordered_records: list[dict[str, Any]] = []
     by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
     chart_to_dataset: dict[str, str] = {}
     dataset_info: dict[str, dict[str, Any]] = {}
+    generation_info: dict[str, dict[str, Any]] = {}
 
-    for rec in read_jsonl(metadata_file):
-        ordered_records.append(rec)
-        dataset = rec.get("dataset") or {}
-        dataset_id = str(dataset.get("id", "?"))
-        chart_id = str(rec["id"])
-        chart_to_dataset[chart_id] = dataset_id
-        by_dataset[dataset_id].append(rec)
-        if dataset_id not in dataset_info:
-            dataset_info[dataset_id] = {
-                "id": dataset_id,
-                "description": dataset.get("description", ""),
-                "label": dataset_label(dataset.get("description", "")),
-            }
+    for generation_name, source_dir in dataset_dirs.items():
+        generation_records: list[dict[str, Any]] = []
+        for rec in read_jsonl(source_dir / "metadata.jsonl"):
+            dataset = rec.get("dataset") or {}
+            dataset_id = str(dataset.get("id", "?"))
+            chart_id = str(rec["id"])
+            if chart_id in chart_to_dataset:
+                raise ValueError(
+                    f"Duplicate chart id {chart_id!r} across generation datasets"
+                )
 
-    return ordered_records, dict(by_dataset), dataset_info, chart_to_dataset
+            rec["_viewer_generation_dataset"] = generation_name
+            ordered_records.append(rec)
+            chart_to_dataset[chart_id] = dataset_id
+            by_dataset[dataset_id].append(rec)
+            generation_records.append(rec)
+            if dataset_id not in dataset_info:
+                dataset_info[dataset_id] = {
+                    "id": dataset_id,
+                    "description": dataset.get("description", ""),
+                    "label": dataset_label(dataset.get("description", "")),
+                }
+
+        generation_info[generation_name] = build_generation_metrics(
+            generation_name,
+            generation_records,
+            source_dir,
+        )
+
+    return (
+        ordered_records,
+        dict(by_dataset),
+        dataset_info,
+        chart_to_dataset,
+        generation_info,
+    )
 
 
 def collect_results(
@@ -248,7 +428,7 @@ def write_detail_image(src: Path, dest: Path, max_width: int, jpeg_quality: int)
 
 def write_chart_images(
     record: dict[str, Any],
-    data_root: Path,
+    source_dir: Path,
     out_dir: Path,
     max_width: int,
     jpeg_quality: int,
@@ -257,7 +437,7 @@ def write_chart_images(
     written = 0
     missing = 0
     seen: set[str] = set()
-    images_dir = data_root / "dataset" / "images"
+    images_dir = source_dir / "images"
     dest_dir = out_dir / "images"
 
     for img in record.get("images", []) or []:
@@ -268,7 +448,7 @@ def write_chart_images(
         if src_name in seen:
             continue
         seen.add(src_name)
-        src = data_root / "dataset" / path_str
+        src = source_dir / path_str
         if not src.exists():
             src = images_dir / src_name
         if not src.exists():
@@ -283,7 +463,7 @@ def write_chart_images(
 
 
 def rewrite_chart_image_paths(record: dict[str, Any], path_map: dict[str, str]) -> dict[str, Any]:
-    rewritten = dict(record)
+    rewritten = {key: value for key, value in record.items() if not key.startswith("_viewer_")}
     images = []
     for img in record.get("images", []) or []:
         if not isinstance(img, dict):
@@ -297,11 +477,11 @@ def rewrite_chart_image_paths(record: dict[str, Any], path_map: dict[str, str]) 
     return rewritten
 
 
-def resolve_source_image(data_root: Path, path_str: str | None) -> Path | None:
+def resolve_source_image(source_dir: Path, path_str: str | None) -> Path | None:
     if not path_str:
         return None
-    images_dir = data_root / "dataset" / "images"
-    src = data_root / "dataset" / path_str
+    images_dir = source_dir / "images"
+    src = source_dir / path_str
     if src.exists():
         return src
     src = images_dir / Path(path_str).name
@@ -326,7 +506,7 @@ def write_thumbnail(src: Path, dest: Path, width: int) -> bool:
 def build_global_chart_index(
     records: list[dict[str, Any]],
     per_chart_stats: dict[str, dict[str, int]],
-    data_root: Path,
+    dataset_dirs: dict[str, Path],
     output: Path,
     base_url: str,
     thumbnail_width: int,
@@ -334,20 +514,23 @@ def build_global_chart_index(
     rows: list[dict[str, Any]] = []
     for rec in records:
         dataset_id = str((rec.get("dataset") or {}).get("id", "?"))
+        generation_name = str(rec["_viewer_generation_dataset"])
+        source_dir = dataset_dirs[generation_name]
         graph = rec.get("graph") or {}
         chart_id = str(rec["id"])
         final_path = final_image_path(rec)
-        thumb_rel = f"thumbnails/{dataset_id}/{chart_id}.jpg"
-        detail_rel = f"charts/{dataset_id}/{chart_id}/"
+        thumb_rel = f"thumbnails/{generation_name}/{dataset_id}/{chart_id}.jpg"
+        detail_rel = f"charts/{generation_name}/{dataset_id}/{chart_id}/"
         thumb_url = f"{base_url.rstrip('/')}/{thumb_rel}" if base_url else None
         detail_url = f"{base_url.rstrip('/')}/{detail_rel}" if base_url else None
-        src = resolve_source_image(data_root, final_path)
+        src = resolve_source_image(source_dir, final_path)
         thumbnail_available = False
         if src is not None:
             thumbnail_available = write_thumbnail(src, output / thumb_rel, thumbnail_width)
         rows.append({
             "id": chart_id,
             "dataset_id": dataset_id,
+            "generation_dataset": generation_name,
             "dataset_description": (rec.get("dataset") or {}).get("description", ""),
             "canonical_type": canonicalize_chart_type(graph.get("type", "")),
             "graph_type": graph.get("type", ""),
@@ -362,6 +545,7 @@ def build_global_chart_index(
             "results_url": f"{detail_url}results.jsonl.gz" if detail_url else None,
             "final_image": normalize_image_path(final_path or ""),
             "quality": quality(rec),
+            "accepted": chart_accepted(rec),
             "correct": per_chart_stats.get(chart_id, {}).get("correct", 0),
             "incorrect": per_chart_stats.get(chart_id, {}).get("incorrect", 0),
         })
@@ -371,11 +555,21 @@ def build_global_chart_index(
 def build(args: argparse.Namespace) -> None:
     data_root = args.data_root.resolve()
     output = args.output.resolve()
-    metadata_file = data_root / "dataset" / "metadata.jsonl"
-    results_dir = data_root / "results"
+    dataset_dirs = discover_dataset_dirs(data_root)
+    if args.generation_dataset:
+        wanted_generation = set(args.generation_dataset)
+        missing = wanted_generation.difference(dataset_dirs)
+        if missing:
+            raise ValueError(
+                f"Unknown generation dataset folder(s): {', '.join(sorted(missing))}"
+            )
+        dataset_dirs = {
+            name: path for name, path in dataset_dirs.items() if name in wanted_generation
+        }
 
-    if not metadata_file.exists():
-        raise FileNotFoundError(f"Missing metadata file: {metadata_file}")
+    results_dir = args.results_dir.resolve() if args.results_dir else data_root / "results"
+    if not results_dir.exists() and args.results_dir is None and (data_root / "evaluation").exists():
+        results_dir = data_root / "evaluation"
     if not results_dir.exists():
         raise FileNotFoundError(f"Missing results directory: {results_dir}")
 
@@ -384,7 +578,13 @@ def build(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=True)
     charts_dir = output / "charts"
 
-    ordered_records, by_dataset, dataset_info, chart_to_dataset = collect_metadata(metadata_file)
+    (
+        ordered_records,
+        by_dataset,
+        dataset_info,
+        chart_to_dataset,
+        generation_info,
+    ) = collect_metadata(dataset_dirs)
     if args.dataset_id:
         wanted = {str(dataset_id) for dataset_id in args.dataset_id}
         ordered_records = [
@@ -399,10 +599,21 @@ def build(args: argparse.Namespace) -> None:
             if dataset_id in wanted
         }
     results_by_chart, models, per_chart_stats = collect_results(results_dir, chart_to_dataset)
+    generation_counts = Counter(
+        str(rec["_viewer_generation_dataset"]) for rec in ordered_records
+    )
+    generation_info = {
+        name: {
+            **info,
+            "bundled_chart_count": generation_counts[name],
+        }
+        for name, info in generation_info.items()
+        if generation_counts[name]
+    }
     chart_index = build_global_chart_index(
         ordered_records,
         per_chart_stats,
-        data_root,
+        dataset_dirs,
         output,
         args.base_url,
         args.thumbnail_width,
@@ -420,13 +631,16 @@ def build(args: argparse.Namespace) -> None:
         for rec in records:
             chart_id = str(rec["id"])
             results = results_by_chart.get(chart_id, [])
+            generation_name = str(rec["_viewer_generation_dataset"])
+            source_dir = dataset_dirs[generation_name]
+            detail_rel = f"charts/{generation_name}/{dataset_id}/{chart_id}/"
             dataset_result_count += len(results)
             graph = rec.get("graph") or {}
-            chart_dir = charts_dir / dataset_id / chart_id
+            chart_dir = output / detail_rel
             chart_dir.mkdir(parents=True, exist_ok=True)
             path_map, copied, missing = write_chart_images(
                 rec,
-                data_root,
+                source_dir,
                 chart_dir,
                 args.detail_image_width,
                 args.detail_jpeg_quality,
@@ -437,6 +651,8 @@ def build(args: argparse.Namespace) -> None:
                 "dataset_id": dataset_id,
                 "dataset": dataset_info[dataset_id],
                 "canonical_type": canonicalize_chart_type(graph.get("type", "")),
+                "generation_dataset": generation_name,
+                "accepted": chart_accepted(rec),
                 "graph_type": graph.get("type", ""),
                 "result_record_count": len(results),
                 "detail_image_width": args.detail_image_width,
@@ -453,9 +669,11 @@ def build(args: argparse.Namespace) -> None:
 
             dataset_chart_entries.append({
                 "id": chart_id,
-                "detail": f"charts/{dataset_id}/{chart_id}/",
-                "metadata": f"charts/{dataset_id}/{chart_id}/metadata.json",
-                "results": f"charts/{dataset_id}/{chart_id}/results.jsonl.gz",
+                "accepted": chart_accepted(rec),
+                "generation_dataset": generation_name,
+                "detail": detail_rel,
+                "metadata": f"{detail_rel}metadata.json",
+                "results": f"{detail_rel}results.jsonl.gz",
                 "detail_bytes": detail_bytes,
                 "result_record_count": len(results),
                 "image_count": copied,
@@ -487,13 +705,17 @@ def build(args: argparse.Namespace) -> None:
 
     type_counts = Counter(row["canonical_type"] for row in chart_index)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 5,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_url": args.base_url,
         "chart_index": "charts.jsonl.gz",
         "chart_index_url": f"{args.base_url.rstrip('/')}/charts.jsonl.gz" if args.base_url else None,
         "dataset_count": len(dataset_entries),
+        "generation_dataset_count": len(generation_info),
+        "generation_datasets": [generation_info[name] for name in sorted(generation_info)],
         "chart_count": len(chart_index),
+        "accepted_chart_count": sum(1 for row in chart_index if row["accepted"]),
+        "rejected_chart_count": sum(1 for row in chart_index if not row["accepted"]),
         "chart_order": "shuffle" if args.shuffle_seed is not None else "metadata",
         "shuffle_seed": args.shuffle_seed,
         "model_count": len(models),
@@ -514,8 +736,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path(__file__).resolve().parents[3],
-        help="Repository root containing dataset/ and results/.",
+        default=Path(__file__).resolve().parents[2],
+        help="Repository root containing named folders under dataset/.",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="Directory containing per-model JSONL results (defaults to results/ or evaluation/).",
+    )
+    parser.add_argument(
+        "--generation-dataset",
+        action="append",
+        help="Only package this named dataset folder. May be supplied multiple times.",
     )
     parser.add_argument(
         "--output",
@@ -531,7 +763,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-id",
         action="append",
-        help="Only package this dataset id. May be supplied multiple times; mainly useful for tests.",
+        help="Only package this source dataset id. May be supplied multiple times.",
     )
     parser.add_argument(
         "--thumbnail-width",

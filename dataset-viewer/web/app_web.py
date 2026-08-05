@@ -104,11 +104,162 @@ def dataset_maps(manifest: dict) -> tuple[dict[str, dict], dict[str, str]]:
     return entries, labels
 
 
+def generation_dataset_names(rows: list[dict], manifest: dict) -> list[str]:
+    names = [
+        str(entry.get("name", ""))
+        for entry in manifest.get("generation_datasets", [])
+        if entry.get("name")
+    ]
+    if not names:
+        names = sorted({
+            str(row.get("generation_dataset", "dataset"))
+            for row in rows
+            if row.get("generation_dataset", "dataset")
+        })
+    return sorted(dict.fromkeys(names))
+
+
+def _metric_rate_label(metric: dict | None) -> str:
+    if not metric:
+        return "-"
+    count = int(metric.get("count", metric.get("accepted_count", 0)) or 0)
+    denominator = int(metric.get("denominator", 0) or 0)
+    rate = metric.get("rate")
+    if not denominator or rate is None:
+        return f"N/A ({count:,}/{denominator:,})"
+    return f"{float(rate):.1%} ({count:,}/{denominator:,})"
+
+
+def render_generation_metrics(
+    manifest: dict,
+    selected_generation: str,
+    standalone: bool = False,
+) -> None:
+    """Render per-folder acceptance progression and generation error rates."""
+    metrics = [
+        entry
+        for entry in manifest.get("generation_datasets", [])
+        if selected_generation == "(all)" or entry.get("name") == selected_generation
+    ]
+    metrics = [
+        metric
+        for metric in metrics
+        if metric.get("acceptance_by_iteration") or metric.get("error_rates")
+    ]
+    if not metrics:
+        st.info(
+            "Dataset generation metrics are unavailable in this bundle. "
+            "Regenerate it with the current prepare_ftp_bundle.py."
+        )
+        return
+
+    iterations = sorted({
+        int(point["iteration"])
+        for metric in metrics
+        for point in metric.get("acceptance_by_iteration", [])
+    })
+    acceptance_rows = []
+    error_rows = []
+    for metric in metrics:
+        points = {
+            int(point["iteration"]): point
+            for point in metric.get("acceptance_by_iteration", [])
+        }
+        average_iterations = metric.get("iterations_per_accepted_chart")
+        accepted_count = int(metric.get("accepted_chart_count", 0))
+        accepted_outputs = int(metric.get("accepted_iteration_output_count", 0))
+        iterations_label = (
+            f"{float(average_iterations):.2f} ({accepted_outputs:,}/{accepted_count:,})"
+            if average_iterations is not None else "-"
+        )
+        acceptance_row = {
+            "Generation dataset": metric["name"],
+            "Charts": int(metric.get("chart_count", 0)),
+            "Iterations / accepted chart": iterations_label,
+        }
+        for iteration in iterations:
+            acceptance_row[f"Accept @ it{iteration}"] = _metric_rate_label(
+                points.get(iteration)
+            )
+        acceptance_rows.append(acceptance_row)
+
+        error_rates = metric.get("error_rates") or {}
+        error_rows.append({
+            "Generation dataset": metric["name"],
+            "Iteration outputs": int(metric.get("iteration_output_count", 0)),
+            "Regeneration attempts": int(metric.get("regeneration_attempt_count", 0)),
+            "Code execution": _metric_rate_label(error_rates.get("code_execution")),
+            "Code regeneration": _metric_rate_label(error_rates.get("code_regeneration")),
+        })
+
+    if standalone:
+        st.title("Dataset generation statistics")
+        metrics_container = st.container()
+    else:
+        metrics_container = st.expander("Dataset generation metrics", expanded=True)
+
+    with metrics_container:
+        st.markdown("**Cumulative acceptance by iteration**")
+        st.caption(
+            "Once a chart is accepted, it remains accepted for every later iteration. "
+            "Each rate is accepted charts divided by all generated charts. "
+            "Iterations per accepted chart counts outputs through first acceptance; "
+            "the initial it0 output counts as one."
+        )
+        st.dataframe(acceptance_rows, use_container_width=True, hide_index=True)
+
+        st.markdown("**Generation error rates**")
+        st.caption(
+            "Code execution uses all generated charts as its denominator. "
+            "Code regeneration uses iteration outputs minus generated charts."
+        )
+        st.dataframe(error_rows, use_container_width=True, hide_index=True)
+
+
+def render_page_navigation() -> str:
+    """Render sidebar navigation and return the active top-level page."""
+    page = st.query_params.get("view") or "charts"
+    if page not in {"charts", "stats"}:
+        page = "charts"
+
+    labels = {"charts": "Charts", "stats": "Statistics"}
+    state_key = "page_navigation"
+    if st.session_state.get(state_key) != labels[page]:
+        st.session_state[state_key] = labels[page]
+
+    def change_page() -> None:
+        target = "stats" if st.session_state[state_key] == "Statistics" else "charts"
+        st.session_state["selected_id"] = None
+        st.query_params.clear()
+        if target == "stats":
+            st.query_params["view"] = "stats"
+        else:
+            generation = (
+                st.session_state.get("generation_dataset")
+                or st.session_state.get("generation_filter")
+            )
+            if generation:
+                st.query_params["generation"] = generation
+
+    st.sidebar.markdown("**Pages**")
+    st.sidebar.segmented_control(
+        "Pages",
+        ["Charts", "Statistics"],
+        key=state_key,
+        on_change=change_page,
+        label_visibility="collapsed",
+        width="stretch",
+    )
+    st.sidebar.markdown("---")
+    return page
+
+
 def init_state(rows: list[dict], manifest: dict) -> None:
     qp = st.query_params
     type_counts = Counter(r.get("canonical_type", "") for r in rows)
     ds_entries, ds_labels = dataset_maps(manifest)
     ds_counts = Counter(str(r.get("dataset_id", "?")) for r in rows)
+    generation_names = set(generation_dataset_names(rows, manifest))
 
     if "type_filter" not in st.session_state:
         qp_type = qp.get("type") or ""
@@ -126,6 +277,16 @@ def init_state(rows: list[dict], manifest: dict) -> None:
     if "quality_filter" not in st.session_state:
         qp_quality = qp.get("quality") or ""
         st.session_state["quality_filter"] = qp_quality if qp_quality in ("good", "bad", "(all)") else "good"
+    if "generation_filter" not in st.session_state:
+        qp_generation = qp.get("generation") or ""
+        st.session_state["generation_filter"] = (
+            qp_generation if qp_generation in generation_names else "(all)"
+        )
+    if "acceptance_filter" not in st.session_state:
+        qp_acceptance = qp.get("accepted") or ""
+        st.session_state["acceptance_filter"] = (
+            qp_acceptance if qp_acceptance in ("accepted", "rejected") else "(all)"
+        )
     if "search" not in st.session_state:
         st.session_state["search"] = qp.get("search") or ""
     if "page" not in st.session_state:
@@ -148,16 +309,22 @@ def current_filter_qp(
     sort_by: str,
     sort_asc: bool,
     quality: str,
+    generation_dataset: str = "(all)",
+    acceptance: str = "(all)",
 ) -> dict[str, str]:
     out: dict[str, str] = {}
     if sel_type != "(all)":
         out["type"] = sel_type
     if sel_dataset != "(all)":
         out["dataset"] = sel_dataset
+    if generation_dataset != "(all)":
+        out["generation"] = generation_dataset
     if search:
         out["search"] = search
     if quality != "(all)":
         out["quality"] = quality
+    if acceptance != "(all)":
+        out["accepted"] = acceptance
     if page:
         out["page"] = str(page)
     if sort_by != "Default":
@@ -190,6 +357,7 @@ def search_matches(row: dict, search: str) -> bool:
         str(row.get("id", "")),
         str(row.get("dataset_id", "")),
         str(row.get("dataset_description", "")),
+        str(row.get("generation_dataset", "dataset")),
         str(row.get("short_description", "")),
         str(row.get("graph_type", "")),
         str(row.get("canonical_type", "")),
@@ -203,14 +371,24 @@ def rows_matching(
     sel_dataset: str = "(all)",
     search: str = "",
     quality: str = "(all)",
+    sel_generation: str = "(all)",
+    acceptance: str = "(all)",
 ) -> list[dict]:
     out = rows
     if sel_type != "(all)":
         out = [r for r in out if r.get("canonical_type") == sel_type]
     if sel_dataset != "(all)":
         out = [r for r in out if str(r.get("dataset_id", "?")) == sel_dataset]
+    if sel_generation != "(all)":
+        out = [
+            r for r in out if str(r.get("generation_dataset", "dataset")) == sel_generation
+        ]
     if quality != "(all)":
         out = [r for r in out if r.get("quality") == quality]
+    if acceptance == "accepted":
+        out = [r for r in out if bool(r.get("accepted"))]
+    elif acceptance == "rejected":
+        out = [r for r in out if not bool(r.get("accepted"))]
     if search:
         out = [r for r in out if search_matches(r, search)]
     return out
@@ -232,13 +410,15 @@ def reset_filters() -> None:
     st.session_state["dataset_filter"] = "(all)"
     st.session_state["search"] = ""
     st.session_state["page"] = 0
+    st.session_state["generation_filter"] = "(all)"
+    st.session_state["acceptance_filter"] = "(all)"
     st.session_state["sort_by"] = "Default"
     st.session_state["sort_asc"] = True
     st.session_state["selected_id"] = None
     st.query_params.clear()
 
 
-def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str, bool, str]:
+def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str, str, bool, str, str]:
     ds_entries, ds_labels = dataset_maps(manifest)
     active_quality = st.session_state.get("quality_filter", "good")
     active_search = st.session_state.get("search", "").strip().lower()
@@ -247,10 +427,36 @@ def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str
     active_dataset = selected_dataset_id(st.session_state.get("dataset_filter", "(all)"))
 
     st.sidebar.header("Filters")
+    generation_names = generation_dataset_names(rows, manifest)
+    generation_counts = Counter(str(r.get("generation_dataset", "dataset")) for r in rows)
+    active_generation = st.session_state.get("generation_filter", "(all)")
+    if active_generation != "(all)" and active_generation not in generation_names:
+        st.session_state["generation_filter"] = "(all)"
+        active_generation = "(all)"
+    generation_options = ["(all)"] + generation_names
+    selected_generation = st.sidebar.selectbox(
+        "Generation dataset",
+        generation_options,
+        format_func=lambda name: name if name == "(all)" else f"{name} ({generation_counts[name]})",
+        key="generation_filter",
+    )
 
-    good_count = len(rows_matching(rows, active_type, active_dataset, active_search, "good"))
-    bad_count = len(rows_matching(rows, active_type, active_dataset, active_search, "bad"))
-    all_quality_count = len(rows_matching(rows, active_type, active_dataset, active_search, "(all)"))
+
+    good_count = len(
+        rows_matching(
+            rows, active_type, active_dataset, active_search, "good", selected_generation
+        )
+    )
+    bad_count = len(
+        rows_matching(
+            rows, active_type, active_dataset, active_search, "bad", selected_generation
+        )
+    )
+    all_quality_count = len(
+        rows_matching(
+            rows, active_type, active_dataset, active_search, "(all)", selected_generation
+        )
+    )
     quality_opts = [f"Good ({good_count})", f"Bad ({bad_count})", f"All ({all_quality_count})"]
     quality_keys = {
         f"Good ({good_count})": "good",
@@ -271,8 +477,27 @@ def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str
     )
     quality = quality_keys.get(q_display, "good")
     st.session_state["quality_filter"] = quality
+    acceptance_count_rows = rows_matching(
+        rows, active_type, active_dataset, active_search, quality, selected_generation
+    )
+    accepted_count = sum(1 for row in acceptance_count_rows if bool(row.get("accepted")))
+    rejected_count = len(acceptance_count_rows) - accepted_count
+    acceptance_labels = {
+        "(all)": f"All ({len(acceptance_count_rows)})",
+        "accepted": f"Accepted ({accepted_count})",
+        "rejected": f"Not accepted ({rejected_count})",
+    }
+    acceptance = st.sidebar.selectbox(
+        "Acceptance",
+        ["(all)", "accepted", "rejected"],
+        format_func=lambda value: acceptance_labels[value],
+        key="acceptance_filter",
+    )
 
-    type_count_rows = rows_matching(rows, "(all)", active_dataset, active_search, quality)
+
+    type_count_rows = rows_matching(
+        rows, "(all)", active_dataset, active_search, quality, selected_generation, acceptance
+    )
     type_counts = Counter(r.get("canonical_type", "") for r in type_count_rows)
     types = ["(all)"] + [
         f"{t} ({n})" for t, n in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -290,7 +515,9 @@ def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str
     )
     selected_type = "(all)" if sel_display == "(all)" else sel_display.rsplit(" (", 1)[0]
 
-    ds_count_rows = rows_matching(rows, selected_type, "(all)", active_search, quality)
+    ds_count_rows = rows_matching(
+        rows, selected_type, "(all)", active_search, quality, selected_generation, acceptance
+    )
     ds_counts = Counter(str(r.get("dataset_id", "?")) for r in ds_count_rows)
     datasets = ["(all)"] + [
         f"{ds_labels.get(did, did)}  ·  id={did} ({n})"
@@ -339,11 +566,29 @@ def render_sidebar(rows: list[dict], manifest: dict) -> tuple[str, str, str, str
         f"{len(rows)} total charts · {len(type_counts)} canonical types · "
         f"{len(ds_entries)} datasets · remote mode"
     )
-    return selected_type, selected_dataset, search, sort_by, st.session_state["sort_asc"], quality
+    return (
+        selected_generation,
+        selected_type,
+        selected_dataset,
+        search,
+        sort_by,
+        st.session_state["sort_asc"],
+        quality,
+        acceptance,
+    )
 
-
-def filter_records(rows: list[dict], sel_type: str, sel_dataset: str, search: str, quality: str) -> list[dict]:
-    return rows_matching(rows, sel_type, sel_dataset, search, quality)
+def filter_records(
+    rows: list[dict],
+    sel_type: str,
+    sel_dataset: str,
+    search: str,
+    quality: str,
+    generation_dataset: str,
+    acceptance: str,
+) -> list[dict]:
+    return rows_matching(
+        rows, sel_type, sel_dataset, search, quality, generation_dataset, acceptance
+    )
 
 
 def sort_records(rows: list[dict], sort_by: str, ascending: bool) -> list[dict]:
@@ -398,7 +643,8 @@ GRID_CSS = """
   font-size: 13px;
 }
 .chart-card__label {
-  padding: 8px 10px;
+  position: relative;
+  padding: 8px 30px 8px 10px;
   font-size: 13px;
   line-height: 1.35;
   border-top: 1px solid #f0f0f0;
@@ -411,6 +657,22 @@ GRID_CSS = """
   font-size: 11px;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+.chart-card__status {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.chart-card__status--accepted {
+  background: #16a34a;
+}
+.chart-card__status--rejected {
+  background: #dc2626;
 }
 @media (max-width: 1100px) {
   .chart-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -457,6 +719,8 @@ def render_grid(rows: list[dict], filter_qp: dict[str, str]) -> None:
     cards: list[str] = []
     for rec in subset:
         label = html.escape(str(rec.get("canonical_type", "")))
+        status_class = "accepted" if bool(rec.get("accepted")) else "rejected"
+        status_label = "Accepted" if bool(rec.get("accepted")) else "Not accepted"
         chart_id = html.escape(str(rec["id"]))
         thumb = rec.get("thumbnail_url") or ""
         if thumb:
@@ -470,6 +734,7 @@ def render_grid(rows: list[dict], filter_qp: dict[str, str]) -> None:
             f'  <div class="chart-card__imgwrap">{img_html}</div>'
             f'  <div class="chart-card__label"><b>{label}</b><br/>'
             f'    <span class="chart-card__id">{chart_id}</span>'
+            f'    <span class="chart-card__status chart-card__status--{status_class}" title="{status_label}"></span>'
             f'  </div>'
             f'</a>'
         )
@@ -538,7 +803,11 @@ def chart_detail_urls(chart_row: dict, manifest: dict) -> tuple[str, str, str]:
     if not detail_url:
         detail_rel = chart_row.get("detail")
         if not detail_rel:
-            detail_rel = f"charts/{chart_row['dataset_id']}/{chart_row['id']}/"
+            generation_name = chart_row.get("generation_dataset")
+            if generation_name:
+                detail_rel = f"charts/{generation_name}/{chart_row['dataset_id']}/{chart_row['id']}/"
+            else:
+                detail_rel = f"charts/{chart_row['dataset_id']}/{chart_row['id']}/"
         detail_url = join_url(manifest.get("base_url", ""), detail_rel)
     metadata_url = chart_row.get("metadata_url") or join_url(detail_url, "metadata.json")
     results_url = chart_row.get("results_url") or join_url(detail_url, "results.jsonl.gz")
@@ -554,10 +823,36 @@ def render_detail(chart_row: dict, manifest: dict) -> None:
     gid = rec["id"]
     chart_block = rec.get("graph", {}) or {}
     ds = rec.get("dataset", {}) or {}
+    accepted = bool(chart_row.get("accepted", rec.get("accepted")))
+    status_class = "accepted" if accepted else "rejected"
+    status_label = "Accepted" if accepted else "Not accepted"
 
     st.button("← Back to grid", on_click=clear_selection)
     st.subheader(f"{chart_block.get('type', 'Chart')}  —  {chart_row.get('canonical_type', '')}")
-    st.caption(f"`{gid}` · dataset #{ds.get('id', '?')}")
+    st.markdown(
+        f"""
+        <div class="chart-meta-row">
+          <code>{html.escape(str(gid))}</code>
+          <span class="chart-status-tag chart-status-tag--{status_class}">
+            <span class="chart-status-tag__dot">&#9679;</span>{status_label}
+          </span>
+          <span>&middot; generation dataset <code>{html.escape(str(chart_row.get('generation_dataset', 'dataset')))}</code>
+          &middot; source dataset #{html.escape(str(ds.get('id', '?')))}</span>
+        </div>
+        <style>
+          .chart-meta-row {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+                             margin:-0.15rem 0 0.75rem; color:#6b7280; font-size:13px; }}
+          .chart-status-tag {{ display:inline-flex; align-items:center; padding:2px 8px;
+                               border-radius:999px; font-size:12px; font-weight:600; }}
+          .chart-status-tag--accepted {{ color:#166534; background:#dcfce7;
+                                         border:1px solid #86efac; }}
+          .chart-status-tag--rejected {{ color:#991b1b; background:#fee2e2;
+                                         border:1px solid #fca5a5; }}
+          .chart-status-tag__dot {{ margin-right:5px; font-size:9px; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     iters = ordered_iterations(rec.get("images", []) or [])
     left, right = st.columns([3, 2])
@@ -587,13 +882,20 @@ def render_detail(chart_row: dict, manifest: dict) -> None:
                 fb = "\n".join(f"- {str(item).strip()}" for item in fb_raw if str(item).strip())
             else:
                 fb = str(fb_raw).strip()
-            if fb:
-                with st.expander("Iteration feedback", expanded=False):
-                    st.markdown(fb)
             code = (img.get("code") or "").strip()
+
+            with st.container(border=True):
+                st.markdown(f"**Iteration {chosen} feedback**")
+                if fb:
+                    st.markdown(fb)
+                else:
+                    st.caption("No feedback recorded for this iteration.")
+
             if code:
                 with st.expander("Iteration code", expanded=False):
                     st.code(code, language="python")
+            else:
+                st.caption("No code recorded for this iteration.")
         else:
             st.info("No images recorded for this chart.")
 
@@ -710,6 +1012,7 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
         with st.expander(f"Q{i}. [{qtype}] {qtext}", expanded=False):
             st.markdown(f"**Ground truth:** {answer}")
             if basis:
+
                 st.caption(f"Answer basis: {basis}")
             model_rows = []
             for model_name in model_order:
@@ -736,11 +1039,25 @@ def main() -> None:
     rows = load_chart_index(manifest)
     init_state(rows, manifest)
 
+    page_view = render_page_navigation()
+    if page_view == "stats":
+        render_generation_metrics(manifest, "(all)", standalone=True)
+        return
+
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
-    sel_type, sel_dataset, search, sort_by, sort_asc, quality = render_sidebar(rows, manifest)
-    filter_key = (sel_type, sel_dataset, search, sort_by, sort_asc, quality)
+    (
+        generation_dataset,
+        sel_type,
+        sel_dataset,
+        search,
+        sort_by,
+        sort_asc,
+        quality,
+        acceptance,
+    ) = render_sidebar(rows, manifest)
+    filter_key = (generation_dataset, sel_type, sel_dataset, search, sort_by, sort_asc, quality, acceptance)
     last_filter = st.session_state.get("_last_filter")
     if last_filter is not None and last_filter != filter_key:
         st.session_state["page"] = 0
@@ -755,6 +1072,8 @@ def main() -> None:
         sort_by,
         sort_asc,
         quality,
+        generation_dataset,
+        acceptance,
     )
     sync_url(filter_qp, st.session_state["selected_id"])
 
@@ -766,7 +1085,11 @@ def main() -> None:
         render_detail(selected, manifest)
         return
 
-    filtered = filter_records(rows, sel_type, sel_dataset, search, quality)
+    render_generation_metrics(manifest, generation_dataset)
+
+    filtered = filter_records(
+        rows, sel_type, sel_dataset, search, quality, generation_dataset, acceptance
+    )
     filtered = sort_records(filtered, sort_by, sort_asc)
     render_grid(filtered, filter_qp)
 

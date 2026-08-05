@@ -15,8 +15,9 @@ The app opens at `http://localhost:8501` by default.
 
 ## Data Location
 
-By default, the local app looks for `dataset/` and `results/` at the repository
-root.
+By default, the local app discovers every `dataset/<name>/metadata.jsonl` at
+the repository root. Results are read from `results/`, falling back to
+`evaluation/` when that is the available directory.
 
 Override these independently if needed:
 
@@ -28,15 +29,25 @@ RESULTS_DIR=/path/to/results \
 
 | Variable | Default | Contents |
 |---|---|---|
-| `DATA_DIR` | repository root | directory containing `dataset/metadata.jsonl` and `dataset/images/` |
-| `RESULTS_DIR` | `$DATA_DIR/results` | directory containing per-model `*.jsonl` result files |
+| `DATA_DIR` | repository root | directory containing named `dataset/<name>/metadata.jsonl` and `dataset/<name>/images/` folders |
+| `RESULTS_DIR` | `$DATA_DIR/results` or `$DATA_DIR/evaluation` | directory containing per-model `*.jsonl` result files |
 
 ## Features
 
-- Thumbnail grid of all charts, showing the final iteration image.
-- Filters for canonical chart type, dataset, text search, and plot quality.
+- Thumbnail grid of all charts, showing the final iteration image and a red or
+  green acceptance indicator.
+- Generation-dataset selector populated from the folder names under `dataset/`.
+- Per-generation-dataset metrics showing cumulative acceptance at every
+  iteration and error rates loaded from `error.jsonl` (also supports
+  `errors.jsonl`, `error.json`, and `errors.json`). Execution errors use
+  chart count; regeneration errors use iteration outputs minus chart count.
+- Filters for canonical chart type, dataset, acceptance, text search, and plot quality.
+- A dedicated **Dataset statistics** page, opened from the sidebar, compares
+  all generation folders as table rows and includes average iteration outputs
+  through first acceptance per accepted chart.
 - Sorting by original order or number of incorrect model answers.
-- Detail view with iteration images, feedback, code, descriptions, structured
+- Detail view with iteration images, visible per-iteration feedback directly
+  above the iteration code, acceptance status, descriptions, structured
   data, questions, and per-model answers.
 - URL query parameters preserve filters, sorting, page, and selected chart.
 

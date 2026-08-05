@@ -3,12 +3,13 @@
 Run:
     streamlit run local/app.py
 
-Set DATA_DIR to point at the directory containing dataset/ and results/:
+Set DATA_DIR to point at the repository directory containing dataset/:
     DATA_DIR=/path/to/data streamlit run local/app.py
 """
 from __future__ import annotations
 
 import base64
+import html
 import json
 import os
 from collections import Counter, defaultdict
@@ -25,12 +26,13 @@ from indexer import build_index, read_records
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_DEFAULT_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ["DATA_DIR"]) if "DATA_DIR" in os.environ else _DEFAULT_ROOT
-DATASET_DIR = ROOT / "dataset"
-IMAGES_DIR = DATASET_DIR / "images"
-METADATA_FILE = DATASET_DIR / "metadata.jsonl"
-RESULTS_DIR = Path(os.environ["RESULTS_DIR"]) if "RESULTS_DIR" in os.environ else ROOT / "results"
+DATASETS_DIR = ROOT / "dataset"
+_DEFAULT_RESULTS_DIR = ROOT / "results"
+if not _DEFAULT_RESULTS_DIR.exists() and (ROOT / "evaluation").exists():
+    _DEFAULT_RESULTS_DIR = ROOT / "evaluation"
+RESULTS_DIR = Path(os.environ["RESULTS_DIR"]) if "RESULTS_DIR" in os.environ else _DEFAULT_RESULTS_DIR
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
 THUMBS_PER_PAGE = 24
@@ -71,11 +73,91 @@ def _quality(rec: dict) -> str:
         fb = " ".join(str(x).strip() for x in fb if str(x).strip())
     return "bad" if str(fb).strip() else "good"
 
+def chart_accepted(rec: dict) -> bool:
+    """Return the chart-level acceptance flag, with an iteration fallback."""
+    accepted = rec.get("accepted")
+    if isinstance(accepted, bool):
+        return accepted
+    images = ordered_iterations(rec.get("images", []) or [])
+    return bool(images and images[-1].get("accept"))
 
-@st.cache_resource(show_spinner="Loading metadata…")
-def load_metadata() -> list[dict]:
+
+
+def discover_dataset_dirs() -> dict[str, Path]:
+    """Return folder-name -> dataset directory for every usable dataset."""
+    dataset_dirs: dict[str, Path] = {}
+
+    # Backward compatibility for the former flat dataset/ layout.
+    if (DATASETS_DIR / "metadata.jsonl").is_file():
+        dataset_dirs[DATASETS_DIR.name] = DATASETS_DIR
+
+    if DATASETS_DIR.is_dir():
+        for child in sorted(DATASETS_DIR.iterdir(), key=lambda path: path.name.lower()):
+            if child.is_dir() and (child / "metadata.jsonl").is_file():
+                dataset_dirs[child.name] = child
+    return dataset_dirs
+
+
+def dataset_dir(dataset_name: str) -> Path:
+    try:
+        return discover_dataset_dirs()[dataset_name]
+    except KeyError as exc:
+        raise FileNotFoundError(f"Unknown generation dataset: {dataset_name}") from exc
+
+@st.cache_data(show_spinner=False)
+def load_error_counts(dataset_name: str) -> dict[str, int]:
+    """Load generation-stage error counts from JSON or JSONL error logs."""
+    counts: Counter = Counter()
+    source_dir = dataset_dir(dataset_name)
+    error_file = next(
+        (
+            source_dir / name
+            for name in ("error.jsonl", "errors.jsonl", "error.json", "errors.json")
+            if (source_dir / name).is_file()
+        ),
+        None,
+    )
+    if error_file is None:
+        return {}
+
+    rows: list[dict] = []
+    try:
+        if error_file.suffix == ".jsonl":
+            with error_file.open(encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        else:
+            payload = json.loads(error_file.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                rows = [row for row in payload if isinstance(row, dict)]
+            elif isinstance(payload, dict):
+                nested = payload.get("errors")
+                rows = (
+                    [row for row in nested if isinstance(row, dict)]
+                    if isinstance(nested, list)
+                    else [payload]
+                )
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    for row in rows:
+        stage = row.get("stage")
+        if stage:
+            counts[str(stage)] += 1
+    return dict(counts)
+
+
+
+@st.cache_resource(show_spinner="Loading metadata...")
+def load_metadata(dataset_name: str) -> list[dict]:
     records: list[dict] = []
-    with METADATA_FILE.open() as f:
+    metadata_file = dataset_dir(dataset_name) / "metadata.jsonl"
+    with metadata_file.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -86,6 +168,8 @@ def load_metadata() -> list[dict]:
                 continue
             rec["_canonical_type"] = canonicalize(rec.get("graph", {}).get("type", ""))
             rec["_quality"] = _quality(rec)
+            rec["_generation_dataset"] = dataset_name
+            rec["_accepted"] = chart_accepted(rec)
             records.append(rec)
     return records
 
@@ -142,17 +226,18 @@ def compute_per_chart_stats() -> dict[str, dict[str, int]]:
     return stats
 
 
-def resolve_image(path_str: str) -> Path | None:
-    """Metadata stores paths like 'images/foo.png' — resolve against dataset/."""
+def resolve_image(path_str: str, dataset_name: str) -> Path | None:
+    """Resolve a metadata image path against its generation dataset folder."""
     if not path_str:
         return None
     p = Path(path_str)
     if p.is_absolute() and p.exists():
         return p
-    cand = DATASET_DIR / p
+    source_dir = dataset_dir(dataset_name)
+    cand = source_dir / p
     if cand.exists():
         return cand
-    cand = IMAGES_DIR / p.name
+    cand = source_dir / "images" / p.name
     return cand if cand.exists() else None
 
 
@@ -194,9 +279,246 @@ def ordered_iterations(images: list[dict]) -> list[dict]:
     return sorted(items, key=key)
 
 
+def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
+    """Compute cumulative acceptance and generation error rates for one folder."""
+    chart_count = len(records)
+    image_lists = [
+        [img for img in (rec.get("images") or []) if isinstance(img, dict)]
+        for rec in records
+    ]
+    iteration_output_count = sum(len(images) for images in image_lists)
+    regeneration_attempt_count = max(iteration_output_count - chart_count, 0)
+    max_iteration_count = max((len(images) for images in image_lists), default=0)
+    accepted_iteration_outputs = 0
+    accepted_chart_count = 0
+    for rec, images in zip(records, image_lists):
+        first_acceptance = next(
+            (index for index, image in enumerate(images) if bool(image.get("accept"))),
+            None,
+        )
+        if first_acceptance is None and rec.get("accepted") is True and images:
+            first_acceptance = len(images) - 1
+        if first_acceptance is not None:
+            accepted_chart_count += 1
+            accepted_iteration_outputs += first_acceptance + 1
+
+
+    acceptance_by_iteration = []
+    for iteration in range(max_iteration_count):
+        accepted_count = 0
+        for rec, images in zip(records, image_lists):
+            accepted = any(bool(img.get("accept")) for img in images[: iteration + 1])
+            # Backward compatibility when only the chart-level final flag exists.
+            if (
+                not accepted
+                and rec.get("accepted") is True
+                and images
+                and iteration >= len(images) - 1
+            ):
+                accepted = True
+            accepted_count += int(accepted)
+        acceptance_by_iteration.append({
+            "iteration": iteration,
+            "accepted_count": accepted_count,
+            "denominator": chart_count,
+            "rate": (accepted_count / chart_count) if chart_count else None,
+        })
+
+    error_counts = load_error_counts(dataset_name)
+    execution_errors = int(error_counts.get("code_execution", 0))
+    regeneration_errors = int(error_counts.get("code_regeneration", 0))
+    return {
+        "name": dataset_name,
+        "chart_count": chart_count,
+        "iteration_output_count": iteration_output_count,
+        "regeneration_attempt_count": regeneration_attempt_count,
+        "accepted_chart_count": accepted_chart_count,
+        "accepted_iteration_output_count": accepted_iteration_outputs,
+        "iterations_per_accepted_chart": (
+            accepted_iteration_outputs / accepted_chart_count
+            if accepted_chart_count
+            else None
+        ),
+        "acceptance_by_iteration": acceptance_by_iteration,
+        "error_rates": {
+            "code_execution": {
+                "count": execution_errors,
+                "denominator": chart_count,
+                "rate": (execution_errors / chart_count) if chart_count else None,
+            },
+            "code_regeneration": {
+                "count": regeneration_errors,
+                "denominator": regeneration_attempt_count,
+                "rate": (
+                    regeneration_errors / regeneration_attempt_count
+                    if regeneration_attempt_count
+                    else None
+                ),
+            },
+        },
+    }
+
+
+def _metric_rate_label(metric: dict | None) -> str:
+    if not metric:
+        return "-"
+    count = int(metric.get("count", metric.get("accepted_count", 0)) or 0)
+    denominator = int(metric.get("denominator", 0) or 0)
+    rate = metric.get("rate")
+    if not denominator or rate is None:
+        return f"N/A ({count:,}/{denominator:,})"
+    return f"{float(rate):.1%} ({count:,}/{denominator:,})"
+
+
+def render_generation_metrics(metrics: list[dict], standalone: bool = False) -> None:
+    """Render exact per-iteration acceptance and stage error rates."""
+    if not metrics:
+        return
+    iterations = sorted({
+        int(point["iteration"])
+        for metric in metrics
+        for point in metric.get("acceptance_by_iteration", [])
+    })
+
+    acceptance_rows = []
+    error_rows = []
+    for metric in metrics:
+        points = {
+            int(point["iteration"]): point
+            for point in metric.get("acceptance_by_iteration", [])
+        }
+        average_iterations = metric.get("iterations_per_accepted_chart")
+        accepted_count = int(metric.get("accepted_chart_count", 0))
+        accepted_outputs = int(metric.get("accepted_iteration_output_count", 0))
+        iterations_label = (
+            f"{float(average_iterations):.2f} ({accepted_outputs:,}/{accepted_count:,})"
+            if average_iterations is not None else "-"
+        )
+        acceptance_row = {
+            "Generation dataset": metric["name"],
+            "Charts": int(metric.get("chart_count", 0)),
+            "Iterations / accepted chart": iterations_label,
+        }
+        for iteration in iterations:
+            acceptance_row[f"Accept @ it{iteration}"] = _metric_rate_label(
+                points.get(iteration)
+            )
+        acceptance_rows.append(acceptance_row)
+
+        error_rates = metric.get("error_rates") or {}
+        error_rows.append({
+            "Generation dataset": metric["name"],
+            "Iteration outputs": int(metric.get("iteration_output_count", 0)),
+            "Regeneration attempts": int(metric.get("regeneration_attempt_count", 0)),
+            "Code execution": _metric_rate_label(error_rates.get("code_execution")),
+            "Code regeneration": _metric_rate_label(error_rates.get("code_regeneration")),
+        })
+
+    if standalone:
+        st.title("Dataset generation statistics")
+        metrics_container = st.container()
+    else:
+        metrics_container = st.expander("Dataset generation metrics", expanded=True)
+
+    with metrics_container:
+        st.markdown("**Cumulative acceptance by iteration**")
+        st.caption(
+            "Once a chart is accepted, it remains accepted for every later iteration. "
+            "Each rate is accepted charts divided by all generated charts. "
+            "Iterations per accepted chart counts outputs through first acceptance; "
+            "the initial it0 output counts as one."
+        )
+        st.dataframe(acceptance_rows, use_container_width=True, hide_index=True)
+
+        st.markdown("**Generation error rates**")
+        st.caption(
+            "Code execution uses all generated charts as its denominator. "
+            "Code regeneration uses iteration outputs minus generated charts."
+        )
+        st.dataframe(error_rows, use_container_width=True, hide_index=True)
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
+def render_page_navigation() -> str:
+    """Render sidebar navigation and return the active top-level page."""
+    page = st.query_params.get("view") or "charts"
+    if page not in {"charts", "stats"}:
+        page = "charts"
+
+    labels = {"charts": "Charts", "stats": "Statistics"}
+    state_key = "page_navigation"
+    if st.session_state.get(state_key) != labels[page]:
+        st.session_state[state_key] = labels[page]
+
+    def change_page() -> None:
+        target = "stats" if st.session_state[state_key] == "Statistics" else "charts"
+        st.session_state["selected_id"] = None
+        st.query_params.clear()
+        if target == "stats":
+            st.query_params["view"] = "stats"
+        else:
+            generation = (
+                st.session_state.get("generation_dataset")
+                or st.session_state.get("generation_filter")
+            )
+            if generation:
+                st.query_params["generation"] = generation
+
+    st.sidebar.markdown("**Pages**")
+    st.sidebar.segmented_control(
+        "Pages",
+        ["Charts", "Statistics"],
+        key=state_key,
+        on_change=change_page,
+        label_visibility="collapsed",
+        width="stretch",
+    )
+    st.sidebar.markdown("---")
+    return page
+
+
+def _generation_dataset_changed() -> None:
+    """Clear dataset-specific state and immediately persist the new folder."""
+    generation_dataset = st.session_state["generation_dataset"]
+    for key in (
+        "type_filter",
+        "dataset_filter",
+        "quality_filter",
+        "quality_filter_display",
+        "search",
+        "acceptance_filter",
+        "page",
+        "sort_by",
+        "sort_asc",
+        "selected_id",
+        "_last_filter",
+    ):
+        st.session_state.pop(key, None)
+    st.query_params.clear()
+    st.query_params["generation"] = generation_dataset
+
+
+def render_generation_dataset_selector(dataset_names: list[str]) -> str:
+    requested = st.query_params.get("generation") or ""
+    if "generation_dataset" not in st.session_state:
+        st.session_state["generation_dataset"] = (
+            requested if requested in dataset_names else dataset_names[0]
+        )
+
+    st.sidebar.header("Generation dataset")
+    selected = st.sidebar.selectbox(
+        "Dataset folder",
+        dataset_names,
+        key="generation_dataset",
+        on_change=_generation_dataset_changed,
+    )
+    st.sidebar.caption(f"dataset/{selected}")
+    st.sidebar.markdown("---")
+    return selected
+
+
 def dataset_short_label(description: str) -> str:
     """Best-effort short label from a dataset description."""
     if not description:
@@ -251,6 +573,13 @@ def _init_state(records: list[dict]) -> None:
         qp_quality = qp.get("quality") or ""
         st.session_state["quality_filter"] = qp_quality if qp_quality in ("good", "bad") else "(all)"
 
+
+    # Acceptance filter
+    if "acceptance_filter" not in st.session_state:
+        qp_acceptance = qp.get("accepted") or ""
+        st.session_state["acceptance_filter"] = (
+            qp_acceptance if qp_acceptance in ("accepted", "rejected") else "(all)"
+        )
     # Search (text input, key='search')
     if "search" not in st.session_state:
         st.session_state["search"] = qp.get("search") or ""
@@ -274,11 +603,20 @@ def _init_state(records: list[dict]) -> None:
 
 
 def current_filter_qp(
-    sel_type: str, sel_dataset: str, search: str, page: int, sort_by: str, sort_asc: bool,
+    sel_type: str,
+    sel_dataset: str,
+    search: str,
+    page: int,
+    sort_by: str,
+    sort_asc: bool,
     quality: str = "(all)",
+    generation_dataset: str = "",
+    acceptance: str = "(all)",
 ) -> dict[str, str]:
     """Build the filter/sort portion of the URL query params."""
     out: dict[str, str] = {}
+    if generation_dataset:
+        out["generation"] = generation_dataset
     if sel_type != "(all)":
         out["type"] = sel_type
     if sel_dataset != "(all)":
@@ -287,6 +625,8 @@ def current_filter_qp(
         out["search"] = search
     if quality != "(all)":
         out["quality"] = quality
+    if acceptance != "(all)":
+        out["accepted"] = acceptance
     if page:
         out["page"] = str(page)
     if sort_by != "Default":
@@ -319,7 +659,7 @@ def clear_selection() -> None:
 SORT_OPTIONS = ["Default", "Incorrect answers"]
 
 
-def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool, str]:
+def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool, str, str]:
     type_counts = Counter(r["_canonical_type"] for r in records)
     types = ["(all)"] + [f"{t} ({n})" for t, n in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
@@ -378,6 +718,20 @@ def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool, str]:
     quality = quality_keys.get(q_display, "(all)")
     st.session_state["quality_filter"] = quality
 
+    accepted_count = sum(1 for r in records if r["_accepted"])
+    rejected_count = len(records) - accepted_count
+    acceptance_labels = {
+        "(all)": f"All ({len(records)})",
+        "accepted": f"Accepted ({accepted_count})",
+        "rejected": f"Not accepted ({rejected_count})",
+    }
+    acceptance = st.sidebar.selectbox(
+        "Acceptance",
+        ["(all)", "accepted", "rejected"],
+        format_func=lambda value: acceptance_labels[value],
+        key="acceptance_filter",
+    )
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Sort**")
     sort_asc = st.session_state["sort_asc"]
@@ -398,7 +752,15 @@ def render_sidebar(records: list[dict]) -> tuple[str, str, str, str, bool, str]:
     st.sidebar.caption(
         f"{len(records)} total charts · {len(type_counts)} canonical types · {len(ds_counts)} datasets"
     )
-    return selected_type, selected_dataset, search, sort_by, st.session_state["sort_asc"], quality
+    return (
+        selected_type,
+        selected_dataset,
+        search,
+        sort_by,
+        st.session_state["sort_asc"],
+        quality,
+        acceptance,
+    )
 
 
 def sort_records(
@@ -416,7 +778,14 @@ def sort_records(
     return records  # Default: preserve metadata.jsonl order
 
 
-def filter_records(records: list[dict], sel_type: str, sel_dataset: str, search: str, quality: str = "(all)") -> list[dict]:
+def filter_records(
+    records: list[dict],
+    sel_type: str,
+    sel_dataset: str,
+    search: str,
+    quality: str = "(all)",
+    acceptance: str = "(all)",
+) -> list[dict]:
     out = records
     if sel_type != "(all)":
         out = [r for r in out if r["_canonical_type"] == sel_type]
@@ -435,6 +804,10 @@ def filter_records(records: list[dict], sel_type: str, sel_dataset: str, search:
         out = [r for r in out if match(r)]
     if quality != "(all)":
         out = [r for r in out if r["_quality"] == quality]
+    if acceptance == "accepted":
+        out = [r for r in out if r["_accepted"]]
+    elif acceptance == "rejected":
+        out = [r for r in out if not r["_accepted"]]
     return out
 
 
@@ -475,10 +848,12 @@ def render_grid(records: list[dict], filter_qp: dict[str, str]) -> None:
     cards: list[str] = []
     for rec in subset:
         iters = ordered_iterations(rec.get("images", []))
-        thumb_path = resolve_image(iters[-1]["path"]) if iters else None
+        thumb_path = resolve_image(iters[-1]["path"], rec["_generation_dataset"]) if iters else None
         data_uri = thumbnail_data_uri(str(thumb_path)) if thumb_path else ""
         label = rec["_canonical_type"]
         short_id = rec["id"][:8]
+        status_class = "accepted" if rec["_accepted"] else "rejected"
+        status_label = "Accepted" if rec["_accepted"] else "Not accepted"
         img_html = (
             f'<img src="{data_uri}" alt="{label}" />'
             if data_uri
@@ -491,6 +866,7 @@ def render_grid(records: list[dict], filter_qp: dict[str, str]) -> None:
             f'  <div class="chart-card__imgwrap">{img_html}</div>'
             f'  <div class="chart-card__label"><b>{label}</b><br/>'
             f'    <span class="chart-card__id">{short_id}…</span>'
+            f'    <span class="chart-card__status chart-card__status--{status_class}" title="{status_label}"></span>'
             f'  </div>'
             f'</a>'
         )
@@ -544,6 +920,8 @@ _GRID_CSS = """
 }
 .chart-card__label {
   padding: 8px 10px;
+  position: relative;
+  padding-right: 30px;
   font-size: 13px;
   line-height: 1.35;
   border-top: 1px solid #f0f0f0;
@@ -552,6 +930,22 @@ _GRID_CSS = """
   color: #6b7280;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+}
+.chart-card__status {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.chart-card__status--accepted {
+  background: #16a34a;
+}
+.chart-card__status--rejected {
+  background: #dc2626;
 }
 @media (max-width: 1100px) {
   .chart-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -567,6 +961,8 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
     gid = rec["id"]
     chart_block = rec.get("graph", {})
     ds = rec.get("dataset", {})
+    status_class = "accepted" if rec["_accepted"] else "rejected"
+    status_label = "Accepted" if rec["_accepted"] else "Not accepted"
 
     st.button("← Back to grid", on_click=clear_selection)
     st.subheader(f"{chart_block.get('type', 'Chart')}  —  {rec['_canonical_type']}")
@@ -598,6 +994,14 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
                    border-radius:4px; border:1px solid #fed7aa; user-select:none; }}
           #pill:hover {{ background:#ffedd5; }}
           #icon-wrap {{ position:relative; width:13px; height:13px; }}
+          .status-tag {{ display:inline-flex; align-items:center; padding:2px 8px;
+                         border-radius:999px; font-size:12px; font-weight:600; }}
+          .status-tag--accepted {{ color:#166534; background:#dcfce7;
+                                    border:1px solid #86efac; }}
+          .status-tag--rejected {{ color:#991b1b; background:#fee2e2;
+                                    border:1px solid #fca5a5; }}
+          .status-tag__dot {{ margin-right:5px; font-size:9px; }}
+
           #icon-copy, #icon-check {{
             position:absolute; top:0; left:0;
             display:inline-flex; align-items:center;
@@ -613,7 +1017,9 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
               <span id="icon-check">{_check_icon}</span>
             </span>
           </div>
-          <span>· dataset #{ds.get("id", "?")}</span>
+          <span class="status-tag status-tag--{status_class}"><span class="status-tag__dot">&#9679;</span>{status_label}</span>
+          <span>· generation dataset {html.escape(rec["_generation_dataset"])}
+          · source dataset #{ds.get("id", "?")}</span>
         </div>
         <script>
           var busy = false;
@@ -656,7 +1062,7 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
                 key=iter_key,
             )
             img = iters[chosen]
-            resolved = resolve_image(img.get("path", ""))
+            resolved = resolve_image(img.get("path", ""), rec["_generation_dataset"])
             if resolved:
                 st.image(str(resolved), use_container_width=True)
             else:
@@ -667,13 +1073,20 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
                 fb = "\n".join(f"- {str(item).strip()}" for item in fb_raw if str(item).strip())
             else:
                 fb = str(fb_raw).strip()
-            if fb:
-                with st.expander("Iteration feedback", expanded=False):
-                    st.markdown(fb)
             code = (img.get("code") or "").strip()
+
+            with st.container(border=True):
+                st.markdown(f"**Iteration {chosen} feedback**")
+                if fb:
+                    st.markdown(fb)
+                else:
+                    st.caption("No feedback recorded for this iteration.")
+
             if code:
                 with st.expander("Iteration code", expanded=False):
                     st.code(code, language="python")
+            else:
+                st.caption("No code recorded for this iteration.")
         else:
             st.info("No images recorded for this chart.")
 
@@ -805,6 +1218,7 @@ def render_questions(
 
             model_rows = []
             for model_name in sorted(result_indexes.keys()):
+
                 r = by_question.get(qtext, {}).get(model_name)
                 if not r:
                     continue
@@ -823,22 +1237,57 @@ def render_questions(
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    records = load_metadata()
+    dataset_dirs = discover_dataset_dirs()
+    if not dataset_dirs:
+        st.error(
+            f"No datasets found under {DATASETS_DIR}. Expected folders containing metadata.jsonl."
+        )
+        return
+
+    page_view = render_page_navigation()
+    if page_view == "stats":
+        metrics = [
+            compute_generation_metrics(name, load_metadata(name))
+            for name in dataset_dirs
+        ]
+        render_generation_metrics(metrics, standalone=True)
+        return
+
+    generation_dataset = render_generation_dataset_selector(list(dataset_dirs))
+    records = load_metadata(generation_dataset)
     result_indexes = load_result_indexes()
     chart_stats = compute_per_chart_stats()
     _init_state(records)
 
-    sel_type, sel_dataset, search, sort_by, sort_asc, quality = render_sidebar(records)
+    (
+        sel_type,
+        sel_dataset,
+        search,
+        sort_by,
+        sort_asc,
+        quality,
+        acceptance,
+    ) = render_sidebar(records)
 
     # Reset page AND selection if filter changed — jump back to the grid.
-    filter_key = (sel_type, sel_dataset, search, sort_by, sort_asc, quality)
+    filter_key = (generation_dataset, sel_type, sel_dataset, search, sort_by, sort_asc, quality, acceptance)
     last_filter = st.session_state.get("_last_filter")
     if last_filter is not None and last_filter != filter_key:
         st.session_state["page"] = 0
         clear_selection()
     st.session_state["_last_filter"] = filter_key
 
-    filter_qp = current_filter_qp(sel_type, sel_dataset, search, st.session_state["page"], sort_by, sort_asc, quality)
+    filter_qp = current_filter_qp(
+        sel_type,
+        sel_dataset,
+        search,
+        st.session_state["page"],
+        sort_by,
+        sort_asc,
+        quality,
+        generation_dataset,
+        acceptance,
+    )
     sync_url(filter_qp, st.session_state["selected_id"])
 
     if st.session_state["selected_id"]:
@@ -850,7 +1299,11 @@ def main() -> None:
             render_detail(selected, result_indexes)
             return
 
-    filtered = filter_records(records, sel_type, sel_dataset, search, quality)
+    render_generation_metrics([
+        compute_generation_metrics(generation_dataset, records)
+    ])
+
+    filtered = filter_records(records, sel_type, sel_dataset, search, quality, acceptance)
     filtered = sort_records(filtered, sort_by, sort_asc, chart_stats)
     render_grid(filtered, filter_qp)
 
