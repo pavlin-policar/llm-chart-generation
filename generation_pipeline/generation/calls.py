@@ -5,22 +5,91 @@ from typing import Literal
 import numpy as np
 from helpers import after_think, strip_code_fences
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 from tools import invoke_with_dataframe_tools
 
 
-class GraphDescription(BaseModel):
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class DatasetUsability(StrictModel):
+    useful: bool
+
+
+class DatasetDescription(StrictModel):
+    description: str
+
+
+class GraphSpec(StrictModel):
+    type: str
+    features: list[str]
+    description: str
+
+
+class GraphSpecs(RootModel[list[GraphSpec]]):
+    pass
+
+
+class FeatureNames(RootModel[list[str]]):
+    pass
+
+
+class PlotPlan(StrictModel):
+    notes: str
+
+
+class GraphEvaluation(StrictModel):
+    rating: int = Field(ge=1, le=5)
+    error_type: list[
+        Literal[
+            "none",
+            "uninformative",
+            "variable_semantics",
+            "aggregation_transformation",
+            "misleading_encoding",
+            "excessive_cardinality",
+            "missing_invalid_data",
+            "visibility",
+            "overlap_clutter",
+            "distinguishability",
+            "scaling_layout",
+            "missing_elements",
+            "rendering_error",
+            "other",
+        ]
+    ] = Field(min_length=1)
+    feedback: str
+
+
+class GraphDescription(StrictModel):
     description: str = Field(min_length=1)
 
 
-class GraphQuestion(BaseModel):
+class GraphQuestion(StrictModel):
     question: str = Field(min_length=1)
     answer: str = Field(min_length=1)
     answer_basis: Literal["image", "both"]
 
 
-class GraphQuestions(BaseModel):
+class GraphQuestions(StrictModel):
     questions: list[GraphQuestion]
+
+
+class QuestionTypes(
+    RootModel[
+        list[
+            Literal[
+                "metadata",
+                "value extraction",
+                "comparison",
+                "trends",
+                "reasoning",
+            ]
+        ]
+    ]
+):
+    pass
 
 
 def invoke_llm(llm, messages, df=None, use_tools=False):
@@ -71,12 +140,8 @@ def determine_dataset_usability_call(llm, metadata) -> dict:
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
-    out = llm.invoke(prompt).content
-    _, out = after_think(out)
-
-    return json.loads(
-        out.replace("```json", "").replace("```", "").strip()
-    )
+    response = invoke_structured_llm(llm, prompt, DatasetUsability)
+    return response.model_dump()
 
 
 def format_dataset_description_call(llm, metadata) -> dict:
@@ -103,22 +168,26 @@ def format_dataset_description_call(llm, metadata) -> dict:
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
-    out = llm.invoke(prompt).content
-    _, out = after_think(out)
+    response = invoke_structured_llm(llm, prompt, DatasetDescription)
+    return response.model_dump()
 
-    return json.loads(
-        out.replace("```json", "").replace("```", "").strip()
-    )
-
-def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> dict:  # Reasoning
+def graphs_call(llm, features: dict, dataset_description: str, num_graphs:int, creativity:float, alpha:float, beta:float) -> list[dict]:  # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
     The specifications consist of graph type, short description, and features that should be used.
 
     LLM gets a random creativity rating that encourages it to produce more standard or more unusual graphs.
-    """
 
-    creat = np.random.beta(2, 4, size=1)[0]
+
+    In parameters set creativity score from 0 to 1 for fixed creativity score or set to 'random' and set parameters alpha and beta to sample the creativity score from beta distribution.
+
+    """
+    if creativity is not None:
+        creat = np.clip(creativity, 0.0, 1.0)
+
+    else:
+        creat = np.random.beta(alpha, beta)
+    
 
     # TODO: implement amount of graphs chosen based on dataset
 
@@ -159,16 +228,11 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs) -> di
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    out = llm.invoke(prompt).content
-    _, out = after_think(out)
-    out = out[out.find("[") : out.rfind("]") + 1]
-
-    spec = json.loads(out)
-
-    return spec
+    response = invoke_structured_llm(llm, prompt, GraphSpecs)
+    return [spec.model_dump() for spec in response.root]
 
 
-def replace_vars_call(llm, features: dict, dataset_description: str) -> dict:  # No reasoning
+def replace_vars_call(llm, features: dict, dataset_description: str) -> list[str]:  # No reasoning
     """
     Calls LLM -> replaces feature names in the dataset with a more semantically meaningful equaivalent.
     """
@@ -188,12 +252,8 @@ def replace_vars_call(llm, features: dict, dataset_description: str) -> dict:  #
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    out = llm.invoke(prompt).content
-    _, out = after_think(out)
-
-    desc = json.loads(out.replace("```json", "").replace("```", ""))
-
-    return desc
+    response = invoke_structured_llm(llm, prompt, FeatureNames)
+    return response.root
 
 
 def compute_info_call(llm, features, selected_plot, head):  # No reasoning
@@ -261,11 +321,14 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
     )
 
-    plan_raw = invoke_llm(llm, plan_prompt, df, use_tools).content
-    _, plan_raw = after_think(plan_raw)
-    plan = strip_code_fences(plan_raw)
-
-    return plan
+    response = invoke_structured_llm(
+        llm,
+        plan_prompt,
+        PlotPlan,
+        df,
+        use_tools,
+    )
+    return json.dumps(response.model_dump(), ensure_ascii=False)
 
 
 def graph_call(
@@ -335,10 +398,10 @@ def graph_call(
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
         f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n"
-        f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
-        if plan is not None
-        else ""
     )
+
+    if plan is not None:
+        code_prompt += f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
 
     out = invoke_llm(llm, code_prompt, df, use_tools).content
     try:
@@ -348,68 +411,6 @@ def graph_call(
 
     code = strip_code_fences(out)
     return code
-
-
-def check_call(llm, image_path: str, plot_code: str) -> dict:  # Reasoning
-    """
-    Calls LLM -> checks the graph and produces feedback and tells us whether it needs to be regenerated.
-
-    """
-
-    review_prompt = (
-        "You are a visualization QA reviewer.\n"
-        "\n"
-        "You will be given:\n"
-        "1) An IMAGE of a chart (the rendered plot).\n"
-        "2) The PYTHON CODE that generated the chart.\n"
-        "\n"
-        "Goal:\n"
-        "Provide practical feedback on readability and distinguishability. Be helpful, not overly strict.\n"
-        "Focus on whether someone can interpret the plot correctly at a glance.\n"
-        "Be very careful with your feedback as wrong feedback can severey impact goodness of graphs. If there are no severe mistakes just set the correction key to false"
-        "\n"
-        "What to check (prioritize):\n"
-        "- Visibility: text size, tick labels, title, axis labels, legend readability.\n"
-        "- Overlap/clutter: label collisions, dense points, overlapping bars/lines, crowded legend.\n"
-        "- Distinguishability: lines/markers too similar, categories hard to tell apart, missing/unclear legend.\n"
-        "- Scaling/layout: axes limits, aspect ratio, too much empty space, cut-off labels, rotated ticks.\n"
-        "- Data-ink issues: overplotting, too many categories, need aggregation/binning/faceting.\n"
-        "- Accessibility basics: ensure contrast is adequate and the plot doesn’t rely on subtle differences only.\n"
-        "IMPORTANT: Do NOT propose a change if it doesn't heavily impact readability. Suggesting changes that would result in only minor improvements is NOT allowed.\n"
-        "\n"
-        "Output requirements (STRICT):\n"
-        "- Output only a valid JSON with keys:\n"
-        "  - feedback: the feedback of the graph, this is strictly only a string.\n"
-        "  - correction: true or false based on whether you think the mistakes in the graph are large enough to warrant re-generation of the plot. If graph cannot be improved without changing its type then set to false.\n"
-        "- Keep it very concise, return only faults of the graph and no positive feedback or explanations.\n"
-        "- Each bullet MUST include:\n"
-        "  (a) the issue (if any),\n"
-        "  (b) a concrete fix in text\n"
-        "- You should output the negative feedback even if it's not severe enough to warrant re-generation."
-        "- Do NOT nitpick minor stylistic preferences. \n"
-        "- Do NOT propose changing the plot type.\n"
-    )
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    # Multimodal message (works with LangChain OpenAI-compatible chat models that support vision)
-    msg = HumanMessage(
-        content=[
-            {"type": "text", "text": review_prompt},
-            {"type": "text", "text": f"CODE:\n{plot_code}"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-        ]
-    )
-
-    resp = llm.invoke([msg])
-
-    out = resp.content
-    _, out = after_think(out)
-
-    feedback = json.loads(out.replace("```json", "").replace("```", ""))
-
-    return feedback
 
 
 def recode_call(
@@ -494,79 +495,6 @@ def recode_call(
 
     return code
 
-
-def rejection_call(llm, image_path: str) -> dict:
-    """
-    Calls LLM -> given the image, return whether graph is good enough to be used in the dataset.
-    """
-
-    reject_prompt = (
-        "You are a visualization QA reviewer.\n"
-        "\n"
-        "You will be given:\n"
-        "1) An IMAGE of a chart or plot.\n"
-        "\n"
-        "Goal:\n"
-        "Decide whether the chart is readable and coherent enough to be accepted into a dataset as a valid visualization of data.\n"
-        "The main question is: can a person understand that this is a meaningful chart and read the visualized data reasonably well?\n"
-        "\n"
-        "Be lenient. The chart does NOT need to be beautiful, optimal, or publication-quality.\n"
-        "Only reject charts with serious readability or coherence problems.\n"
-        "\n"
-        "Accept the chart if:\n"
-        "- It clearly appears to visualize data.\n"
-        "- The main plotted values, trends, or patterns are visible.\n"
-        "- Axes, labels, legend, or context are readable enough when they are needed for interpretation.\n"
-        "- Categories, lines, bars, points, or other visual elements are distinguishable enough.\n"
-        "- The chart is not so cluttered, cut off, distorted, or low-quality that the data cannot be understood.\n"
-        "\n"
-        "Reject the chart ONLY if it has a severe issue that makes it unsuitable for the dataset, such as:\n"
-        "- Text, tick labels, legend, or axis labels are unreadable when needed for interpretation.\n"
-        "- Important chart elements are cut off or missing.\n"
-        "- The plot is too cluttered or overlapped to understand the data.\n"
-        "- Colors, lines, markers, or categories are impossible to distinguish.\n"
-        "- The chart is visually corrupted, nonsensical, empty, or does not appear to convey data.\n"
-        "- The layout or scaling makes the data misleading or unreadable.\n"
-        "\n"
-        "Do NOT reject charts for minor stylistic issues, small imperfections, suboptimal design choices, or changes that would only slightly improve the chart.\n"
-        "Do NOT suggest changing the chart type.\n"
-        "Do NOT nitpick.\n"
-        "\n"
-        "Output requirements STRICT:\n"
-        "- Output only valid JSON.\n"
-        "- Use exactly these keys:\n"
-        "  - accept: true or false, whether the chart should be accepted into the dataset.\n"
-        "  - reason: a concise string explaining the reason for rejection. If accept is true, use an empty string.\n"
-        "\n"
-        "Rules:\n"
-        '- If the chart is usable, return: {"accept": true, "reason": ""}\n'
-        '- If the chart is not usable, return: {"accept": false, "reason": "brief reason for rejection"}\n'
-        "- The reason should only describe severe readability, coherence, or usability issues.\n"
-        "- Do not include positive feedback.\n"
-        "- Do not include minor issues.\n"
-        "- Do not include explanations outside the JSON.\n"
-    )
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    # Multimodal message (works with LangChain OpenAI-compatible chat models that support vision)
-    msg = HumanMessage(
-        content=[
-            {"type": "text", "text": reject_prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-        ]
-    )
-
-    resp = llm.invoke([msg])
-
-    out = resp.content
-    _, out = after_think(out)
-
-    feedback = json.loads(out.replace("```json", "").replace("```", ""))
-
-    return feedback
-
 def graph_evaluation_call(
     llm,
     image_path: str,
@@ -582,126 +510,90 @@ def graph_evaluation_call(
         "\n"
         "You will be given:\n"
         "1) An IMAGE of a chart or plot.\n"
-        "2) The PYTHON CODE that generated the chart.\n"
+        "2) The PYTHON CODE that generated it.\n"
         "\n"
         "Goal:\n"
-        "Decide whether the chart is readable, semantically coherent, and "
-        "informative enough to be accepted into a dataset as a valid "
-        "visualization of data.\n"
+        "Evaluate whether the chart is readable, semantically valid, and informative "
+        "enough to be included in a visualization dataset.\n"
         "\n"
-        "The image is the primary evidence. Use the code to understand which "
-        "variables, transformations, groupings, aggregations, filters, and "
-        "visual encodings produced the visible result and to propose a concrete "
-        "code-level correction when necessary.\n"
+        "Use the image as primary evidence and the code to understand variables, "
+        "transformations, grouping, aggregation, filtering, and visual encoding.\n"
         "\n"
-        "Be lenient about minor styling and aesthetics, but not about readability, "
-        "semantic validity, or informativeness. The chart does not need to be "
-        "beautiful, optimal, or publication-quality. However, it must communicate "
-        "a meaningful and interpretable relationship, distribution, comparison, "
-        "composition, or trend.\n"
+        "Be lenient about minor styling. Penalize only issues that meaningfully affect "
+        "interpretation, semantic validity, or informativeness. The chart does not "
+        "need to be optimal or publication-quality.\n"
         "\n"
-        "The chart type was selected by an earlier workflow stage and must remain "
-        "fixed. Do not propose changing the chart type under any circumstances.\n"
-        "\n"
-        "However, still reject the chart if it is uninformative, semantically "
-        "invalid, misleading, or unreadable, including when the selected chart "
-        "type combined with the chosen variables or encoding produces an "
-        "uninformative result.\n"
-        "\n"
-        "When rejecting a chart, recommend only fixes that preserve the current "
-        "chart type. Possible fixes include changing variable assignment, "
-        "aggregation, grouping, filtering, binning, ordering, scaling, "
+        "The chart type is fixed. NEVER recommend changing it. Corrections may change "
+        "variables, aggregation, grouping, filtering, binning, ordering, scaling, "
         "normalization, labels, limits, sampling, or other code-level details.\n"
         "\n"
-        "Evaluate the chart in two stages:\n"
+        "Check for:\n"
         "\n"
-        "1) SEMANTIC VALIDITY AND INFORMATIVENESS\n"
+        "SEMANTIC / INFORMATIONAL PROBLEMS:\n"
+        "- Variables used with invalid or misleading semantics, such as IDs or "
+        "categorical codes treated as meaningful continuous measurements.\n"
+        "- Grouping, aggregation, filtering, normalization, ordering, scaling, or "
+        "other transformations that create a misleading or trivial result.\n"
+        "- Charts with effectively no meaningful comparison or variation because of "
+        "their construction (e.g. one effective point/group or constant values).\n"
+        "- Excessive category cardinality or granularity that prevents interpretation.\n"
+        "- Labels, axes, titles, legends, or encodings implying unsupported meaning.\n"
+        "- Missing, invalid, artifact, or default values materially distorting the chart.\n"
+        "- A technically valid chart that communicates almost no useful information "
+        "because of its variable or encoding choices.\n"
         "\n"
-        "Reject the chart if it has a major semantic or informational problem, "
-        "including:\n"
-        "- The visualization is technically non-empty but communicates almost "
-        "no useful information.\n"
-        "- The variables are used in a semantically invalid, arbitrary, or "
-        "misleading way.\n"
-        "- Identifiers, row indices, arbitrary numeric codes, or similar fields "
-        "are treated as meaningful continuous measurements without a valid reason.\n"
-        "- Numeric values are treated as unordered categories, or categorical "
-        "codes are treated as meaningful numeric magnitudes, without a valid reason.\n"
-        "- The selected variables, grouping, aggregation, or encoding produce a "
-        "chart from which no meaningful interpretation can reasonably be made.\n"
-        "- An aggregation, grouping, filtering, or transformation removes the "
-        "important variation and leaves a trivial or misleading result.\n"
-        "- The chart contains only one meaningful group, one effective data point, "
-        "constant values, or nearly identical values, making the intended "
-        "comparison or pattern uninformative.\n"
-        "- Excessive category cardinality or excessive granularity makes the "
-        "visualization effectively uninterpretable.\n"
-        "- The axes, groups, title, legend, labels, or visual encodings imply a "
-        "meaning that is not supported by the data or code.\n"
-        "- The current chart is uninformative because its variables, aggregation, "
-        "grouping, ordering, scaling, or encoding obscure rather than communicate "
-        "the data.\n"
-        "- The chart is dominated by missing values, invalid values, artifacts, "
-        "or meaningless default values.\n"
-        "- Incorrect ordering, aggregation, normalization, scaling, or comparison "
-        "creates a misleading impression.\n"
+        "Do NOT penalize a chart simply because the true relationship is weak, the "
+        "distribution is simple, or no strong pattern exists.\n"
         "\n"
-        "Do not reject a chart merely because the relationship between variables "
-        "is weak or absent, the distribution is simple, or no dramatic pattern is "
-        "present. Real data may legitimately show little association.\n"
+        "READABILITY PROBLEMS:\n"
+        "- Unreadable or clipped labels, ticks, titles, legends, or annotations.\n"
+        "- Overlap, clutter, or excessive density that prevents interpretation.\n"
+        "- Categories, colors, lines, bars, points, or markers that cannot be "
+        "distinguished adequately.\n"
+        "- Scaling, limits, or layout that hide important information or mislead.\n"
+        "- Missing required context or rendering failures.\n"
         "\n"
-        "Reject only when the chart itself is semantically invalid, misleading, "
-        "trivial because of how it was constructed, or unable to support a "
-        "meaningful interpretation.\n"
+        "Do not nitpick minor aesthetic issues.\n"
         "\n"
-        "2) READABILITY AND PRESENTATION\n"
+        "Rating scale:\n"
+        "- 5: Excellent; no meaningful problems.\n"
+        "- 4: Good; minor issues only, fully usable.\n"
+        "- 3: Acceptable but noticeably flawed; still interpretable and defensible.\n"
+        "- 2: Poor; major issue substantially harms the chart and warrants regeneration.\n"
+        "- 1: Invalid; severe semantic, informational, readability, or rendering failure.\n"
         "\n"
-        "Accept the chart only if:\n"
-        "- It clearly visualizes data.\n"
-        "- The main values, trends, distributions, patterns, or comparisons are "
-        "visible enough to interpret.\n"
-        "- Necessary labels, ticks, axes, titles, annotations, and legends are "
-        "readable.\n"
-        "- Categories, lines, bars, points, colors, markers, or other visual "
-        "elements are distinguishable enough.\n"
-        "- The chart can be interpreted correctly without serious difficulty.\n"
+        "Use 1-2 only when regeneration is justified. Minor imperfections should "
+        "normally receive 4-5.\n"
         "\n"
-        "Reject the chart for serious presentation problems such as:\n"
-        "- Important text, tick labels, legends, annotations, or axis labels are "
-        "unreadable.\n"
-        "- Important chart elements are missing, clipped, or cut off.\n"
-        "- Overlap, clutter, or excessive density prevents interpretation.\n"
-        "- Categories, colors, lines, bars, points, or markers cannot be "
-        "distinguished.\n"
-        "- The chart is empty, corrupted, nonsensical, or fails to visibly convey "
-        "data.\n"
-        "- Scaling, limits, or layout hide important variation or make the chart "
-        "misleading or unreadable.\n"
+        "Error types:\n"
+        "- uninformative\n"
+        "- variable_semantics\n"
+        "- aggregation_transformation\n"
+        "- misleading_encoding\n"
+        "- excessive_cardinality\n"
+        "- missing_invalid_data\n"
+        "- visibility\n"
+        "- overlap_clutter\n"
+        "- distinguishability\n"
+        "- scaling_layout\n"
+        "- missing_elements\n"
+        "- rendering_error\n"
+        "- other\n"
         "\n"
-        "Do not reject charts for minor stylistic issues or changes that would "
-        "only slightly improve their appearance. Do not nitpick.\n"
-        "\n"
-        "Do not change or recommend changing the chart type. If the chart is "
-        "uninformative, reject it and propose a concrete correction that keeps "
-        "the same chart type.\n"
-        "\n"
-        "Output requirements:\n"
-        "- Output only valid JSON.\n"
-        "- Use exactly these keys:\n"
-        "  - accept: true or false\n"
-        "  - feedback: a concise string\n"
+        "Output ONLY valid JSON with exactly these keys:\n"
+        '  - "rating": integer from 1 to 5\n'
+        '  - "error_type": list of applicable error types; use empty array [] if there are no errors.\n'
+        '  - "feedback": concise description of the most important issue and a '
+        "concrete code-level fix that preserves the chart type\n"
         "\n"
         "Rules:\n"
-        '- If usable, return exactly: {"accept": true, "feedback": ""}\n'
-        "- If not usable, set accept to false and describe:\n"
-        "  1) the single most serious visible or semantic issue;\n"
-        "  2) a concrete fix that can be applied to the Python code while "
-        "preserving the current chart type.\n"
-        "- Feedback will be passed directly to a code-regeneration agent.\n"
-        "- Only include feedback for issues serious enough to prevent acceptance.\n"
-        "- Do NOT include positive feedback.\n"
-        "- Do NOT propose changing the chart type.\n"
-        "- Do NOT include explanations, Markdown, or text outside the JSON.\n"
+        '- Rating 5 with no issue: use an empty array [] and an empty feedback string.\n'
+        "- Ratings 1-2: feedback must explain why regeneration is warranted and give "
+        "a concrete fix.\n"
+        "- Ratings 3-4: feedback may mention meaningful issues that do not require "
+        "regeneration.\n"
+        "- Include faults only; do NOT include any positive feedback, Markdown, or extra text.\n"
+        "- Do NOT suggest changing the chart type. This is very important, so you MUST NOT suggest changing the chart type.\n"
     )
 
     with open(image_path, "rb") as f:
@@ -720,16 +612,8 @@ def graph_evaluation_call(
         ]
     )
 
-    resp = llm.invoke([msg])
-
-    out = resp.content
-    _, out = after_think(out)
-
-    result = json.loads(
-        out.replace("```json", "").replace("```", "").strip()
-    )
-
-    return result
+    response = invoke_structured_llm(llm, [msg], GraphEvaluation)
+    return response.model_dump()
 
 
 def describe_graph_png(
@@ -864,6 +748,10 @@ def generate_graph_questions(
 
     # TODO: Implement variable questions
 
+    easy = round(num * 0.35)
+    medium = round(num * 0.30)
+    hard = num - easy - medium
+
     qa_prompt = (
         "You are a chart QA generator.\n"
         "\n"
@@ -876,9 +764,9 @@ def generate_graph_questions(
         "Task:\n"
         f"Generate EXACTLY {num} questions about the chart.\n"
         "Include a mix of difficulties:\n"
-        "- 7 easy (direct reading: titles, axes, legend, counts, obvious comparisons)\n"
-        "- 6 medium (interpretation: comparisons across groups, trends, approximate ranges, notable patterns)\n"
-        "- 7 hard (multi-step reasoning grounded in the chart + context, but still definitively answerable, these questions should be questions that experts would ask when looking at the chart.)\n"
+        f"- {easy} easy (direct reading: titles, axes, legend, counts, obvious comparisons)\n"
+        f"- {medium} medium (interpretation: comparisons across groups, trends, approximate ranges, notable patterns)\n"
+        f"- {hard} hard (multi-step reasoning grounded in the chart + context, but still definitively answerable, these questions should be questions that experts would ask when looking at the chart.)\n"
         "\n"
         "CRITICAL CONSTRAINTS:\n"
         "- Every question MUST be definitively answerable from the provided IMAGE and/or the provided chart/dataset descriptions.\n"
@@ -1026,9 +914,5 @@ def give_question_types(llm, questions):  # No reasoning
         f"{json.dumps(questions, indent=2)}"
     )
 
-    out = llm.invoke(prompt).content
-    _, out = after_think(out)
-
-    out = json.loads(out.replace("```json", "").replace("```", ""))
-
-    return out
+    response = invoke_structured_llm(llm, prompt, QuestionTypes)
+    return response.root

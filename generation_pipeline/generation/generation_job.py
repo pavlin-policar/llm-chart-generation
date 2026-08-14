@@ -9,7 +9,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from calls import (
-    check_call,
     describe_graph_png,
     determine_dataset_usability_call,
     format_dataset_description_call,
@@ -20,14 +19,13 @@ from calls import (
     graphs_call,
     plan_call,
     recode_call,
-    rejection_call,
     replace_vars_call,
     graph_evaluation_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
 
-API_URL = "http://ixb2:8000/v1"
+API_URL = "http://0.0.0.0:8888/v1"
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
@@ -108,6 +106,12 @@ def parse_args(default_seed):
         "--fixed_datasets",
         action="store_true",
         help="Use datasets from the configs/good_datasets.jsonl file",
+    )
+    parser.add_argument(
+        "--rating_threshold",
+        type=int,
+        default=3,
+        help="Minimum rating for which the graph is accepted.",
     )
     return parser.parse_args()
 
@@ -267,11 +271,38 @@ def generate_graph_types(
                 "graph_types_generation",
                 "num_graphs",
             )
+
+            creativity = stage_parameter(
+                stages,
+                "graph_types_generation",
+                "creativity"
+            )
+
+            alpha, beta = 2, 4
+
+            if creativity == "random" or type(creativity) not in (int, float):
+                alpha = stage_parameter(
+                    stages,
+                    "graph_types_generation",
+                    "alpha"
+                )
+
+                beta = stage_parameter(
+                    stages,
+                    "graph_types_generation",
+                    "beta"
+                )
+
+                creativity = None
+                                
             graph_types = graphs_call(
                 graph_types_llm,
                 json.dumps(head_json),
                 dataset_sem["description"],
                 num_graphs,
+                creativity=creativity,
+                alpha=alpha,
+                beta=beta
             )
 
             for graph_type in graph_types:
@@ -316,6 +347,7 @@ def review_and_regenerate(
     graph_number,
     graph_count,
     time_start,
+    rating_threshold
 ):
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
@@ -348,19 +380,24 @@ def review_and_regenerate(
 
                 feedback_text = feedback["feedback"]
 
+                rating = int(feedback["rating"])
+                accepted = rating >= rating_threshold
+
                 images.append(
                     {
                         "path": os.path.relpath(
                             graph_file_path,
                             dataset_folder,
                         ),
+                        "rating": rating,
                         "feedback": feedback_text,
-                        "accept": feedback["accept"],
+                        "accept": accepted,
+                        "error_type": feedback["error_type"],
                         "code": code,
                     }
                 )
 
-                if feedback["accept"] or iteration >= max_iterations:
+                if accepted or iteration >= max_iterations:
                     break
 
             except Exception as error:
@@ -376,8 +413,10 @@ def review_and_regenerate(
                             graph_file_path,
                             dataset_folder,
                         ),
+                        "rating": None,
                         "feedback": feedback_text,
                         "accept": False,
+                        "error_type": ["generation_error"],
                         "code": code,
                     }
                 )
@@ -453,8 +492,10 @@ def review_and_regenerate(
                         graph_file_path,
                         dataset_folder,
                     ),
+                    "rating": None,
                     "feedback": feedback_text,
                     "accept": False,
+                    "error_type": ["generation_error"],
                     "code": last_valid_code,
                 }
             )
@@ -551,6 +592,7 @@ def generate_graph(
     stages,
     llm,
     llm_think,
+    rating_threshold
 ):
     global CURRENT_STAGE
 
@@ -624,6 +666,7 @@ def generate_graph(
         graph_index + 1,
         len(graph_types),
         time_start,
+        rating_threshold,
     )
     
     graph_data = regenerated_data if regenerated_data is not None else graph_data
@@ -813,6 +856,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                         stages,
                         llm,
                         llm_think,
+                        args.rating_threshold,
                     )
                     append_metadata(metadata_path, metadata)
                     image_index += 1
