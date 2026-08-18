@@ -343,7 +343,8 @@ def graph_call(
     """
     Calls LLM -> generates the code needed to plot the graph.
 
-    It uses a planning step before the actual call, since this seems to improve the generation.
+    If previous_code and execution_error are provided, the model repairs the
+    previous implementation instead of generating a new visualization approach.
     """
 
     code_prompt = (
@@ -401,9 +402,13 @@ def graph_call(
     )
 
     if plan is not None:
-        code_prompt += f"PLAN from planning agent: {json.dumps(plan, ensure_ascii=False)}\n"
+        code_prompt += (
+            f"\nPLAN from planning agent:\n"
+            f"{json.dumps(plan, ensure_ascii=False)}\n"
+        )
 
     out = invoke_llm(llm, code_prompt, df, use_tools).content
+
     try:
         _, out = after_think(out)
     except Exception:
@@ -493,6 +498,97 @@ def recode_call(
 
     code = out.replace("```python", "").replace("```", "")
 
+    return code
+
+def graph_error_call(
+    llm,
+    features,
+    selected_plot,
+    head,
+    previous_code,
+    execution_error,
+    df=None,
+    use_tools=False,
+) -> str:
+    """
+    Calls LLM -> repairs graph code that failed during execution.
+
+    The previous code is treated as the source of truth for the intended
+    visualization. The model should only fix execution issues and should not
+    redesign or semantically improve the chart.
+    """
+
+    code_prompt = (
+        "You are a plot code repair agent.\n"
+        "You are given Python code that was intended to render a plot but failed during execution.\n"
+        "Your job is to fix the execution error while preserving the intended visualization.\n\n"
+
+        "Repair rules:\n"
+        "- Treat the PREVIOUS CODE as the source of truth for the intended visualization.\n"
+        "- Fix ONLY problems necessary for the code to execute successfully.\n"
+        "- Preserve the current plot type, features, transformations, aggregation, "
+        "binning, filters, axes, and visual semantics as much as possible.\n"
+        "- Do NOT redesign, simplify, or semantically improve the chart unless required to fix the error.\n"
+        '- Do NOT change plot type.\n'
+        '- Use ONLY the columns listed in selected_plot["features"].\n'
+        "- You may derive temporary helper columns ONLY from those listed features.\n"
+        "- Save the plot with plt.savefig(); the path is available in a variable named "
+        "`graph_file_path`. Use this variable but do not change it.\n\n"
+
+        "Libraries:\n"
+        "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. "
+        "Do NOT use seaborn!\n"
+        "- Do NOT use pandas plotting; always use matplotlib directly.\n\n"
+
+        "CRITICAL: The corrected code must still define BOTH:\n"
+        "1) A pandas DataFrame named `graph_df` containing the FINAL PROCESSED DATA actually used for plotting.\n"
+        "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
+        "graph_data = {\n"
+        '  "plot_type": string,\n'
+        '  "features_expected": list[str],\n'
+        '  "features_used": list[str],\n'
+        '  "derived_features": list[str],\n'
+        '  "x": string or null or array of values if multiple subplots,\n'
+        '  "y": string or null or array of values if multiple subplots,\n'
+        '  "hue": string or null or array of values if multiple subplots,\n'
+        '  "facet": string or null,\n'
+        '  "aggregation": string or null or array of values if multiple subplots,\n'
+        '  "binning": string or null or array of values if multiple subplots,\n'
+        '  "transformations": list[str] or array of values if multiple subplots,\n'
+        '  "filters": list[str],\n'
+        '  "n_rows_input": int,\n'
+        '  "n_rows_plotted": int,\n'
+        '  "title": string\n'
+        "}\n\n"
+
+        "Validation rules:\n"
+        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
+        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
+        '- ALWAYS keep graph_data["features_expected"] equal to selected_plot["features"].\n'
+        "- Do NOT print anything.\n"
+        "- Output ONLY MINIMAL executable Python code.\n"
+        "- Return the COMPLETE corrected code, not a patch or explanation.\n\n"
+
+        "Inputs you must rely on:\n"
+        f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
+        f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
+        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n\n"
+
+        "PREVIOUS CODE:\n"
+        f"{previous_code}\n\n"
+
+        "EXECUTION ERROR:\n"
+        f"{execution_error}\n"
+    )
+
+    out = invoke_llm(llm, code_prompt, df, use_tools).content
+
+    try:
+        _, out = after_think(out)
+    except Exception:
+        pass
+
+    code = strip_code_fences(out)
     return code
 
 def graph_evaluation_call(

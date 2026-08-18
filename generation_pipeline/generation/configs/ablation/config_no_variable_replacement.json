@@ -15,13 +15,15 @@
         "variable_replacement": {
             "active": false,
             "parameters": {
-                "reasoning": false
+                "reasoning": true
             }
         },
         "graph_types_generation": {
             "parameters": {
                 "creativity": "random",
-                "reasoning": false,
+                "alpha": 2,
+                "beta": 4,
+                "reasoning": true,
                 "num_graphs": 10,
                 "_comment": "Pass 'variable_per_dataset' for the LLM to choose number of graph types depending on the dataset."
             }
@@ -35,32 +37,32 @@
         },
         "code_generation": {
             "parameters": {
-                "reasoning": false,
+                "reasoning": true,
                 "tools": false
             }
         },
         "feedback": {
             "parameters": {
-                "reasoning": false
+                "reasoning": true
             }
         },
         "code_regeneration": {
             "active": true,
             "parameters": {
-                "reasoning": false,
+                "reasoning": true,
                 "iterations": 5,
                 "tools": false
             }
         },
         "description": {
             "parameters": {
-                "reasoning": false,
+                "reasoning": true,
                 "tools": false
             }
         },
         "questions": {
             "parameters": {
-                "reasoning": false,
+                "reasoning": true,
                 "tools": false,
                 "num_questions": 20,
                 "one": false

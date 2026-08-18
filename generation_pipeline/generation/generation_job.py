@@ -21,11 +21,12 @@ from calls import (
     recode_call,
     replace_vars_call,
     graph_evaluation_call,
+    graph_error_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
 
-API_URL = "http://0.0.0.0:8888/v1"
+API_URL = "http://ixb2:8000/v1"
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
@@ -352,11 +353,14 @@ def review_and_regenerate(
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
     regeneration_active = stage_is_active(stages, "code_regeneration")
+
     max_iterations = (
         stage_parameter(stages, "code_regeneration", "iterations")
         if regeneration_active
         else 0
     )
+
+    num_code_error_regen = stage_parameter(stages, "code_generation", "error_iterations")
 
     graph_data = None
     graph_df = None
@@ -365,7 +369,6 @@ def review_and_regenerate(
 
     skip_evaluation = False
     last_valid_code = code
-
 
     while True:
         previous_graph_file_path = graph_file_path
@@ -459,15 +462,47 @@ def review_and_regenerate(
 
             plt.close("all")
 
-            graph_data, graph_df = execute_graph_code(
-                code,
-                df,
-                selected_plot,
-                graph_file_path,
-            )
+            iterations_error = 0
+            exec_error = None
 
-            last_valid_code = code
+            while True:
 
+                try:
+                    graph_data, graph_df = execute_graph_code(
+                        code,
+                        df,
+                        selected_plot,
+                        graph_file_path,
+                    )
+
+                    exec_error = None
+                    last_valid_code = code
+                    
+                    break
+
+                except Exception as e:
+
+                    exec_error = e
+
+                    if iterations_error >= num_code_error_regen:
+                        break
+        
+                    code = graph_error_call(
+                        recode_llm,
+                        dataset_sem.get("features"),
+                        selected_plot,
+                        df.head(5).to_dict(orient="records"),
+                        previous_code=code,
+                        execution_error=str(exec_error),
+                        df=df,
+                        use_tools=stage_uses_tools(stages, "code_regeneration")
+                    ) 
+
+                iterations_error += 1
+
+            if exec_error is not None:
+                raise ValueError("Failed code execution for iteration.")
+            
         except Exception as error:
             plt.close("all")
             log_error("code_regeneration", error)
@@ -592,7 +627,7 @@ def generate_graph(
     stages,
     llm,
     llm_think,
-    rating_threshold
+    rating_threshold,
 ):
     global CURRENT_STAGE
 
@@ -626,6 +661,11 @@ def generate_graph(
 
     CURRENT_STAGE = "code_generation"
     code_llm = select_llm(stages, "code_generation", llm, llm_think)
+
+    num_code_error_regen = stage_parameter(stages, "code_generation", "error_iterations")
+    iterations_error = 0
+    exec_error = None
+
     code = graph_call(
         code_llm,
         dataset_sem.get("features"),
@@ -638,12 +678,43 @@ def generate_graph(
 
     plt.style.use(selected_plot["style"])
     CURRENT_STAGE = "code_execution"
-    graph_data, graph_df = execute_graph_code(
-        code,
-        df,
-        selected_plot,
-        graph_file_path,
-    )
+
+    while True:
+
+        try: 
+            graph_data, graph_df = execute_graph_code(
+                code,
+                df,
+                selected_plot,
+                graph_file_path,
+            )
+            exec_error = None
+
+            break
+
+        except Exception as e:
+            exec_error = e
+
+            if iterations_error >= num_code_error_regen:
+                break
+
+            code = graph_error_call(
+                code_llm,
+                dataset_sem.get("features"),
+                selected_plot,
+                df.head(5).to_dict(orient="records"),
+                previous_code=code,
+                execution_error=str(exec_error),
+                df=df,
+                use_tools=stage_uses_tools(stages, "code_generation")
+            )
+
+        iterations_error += 1
+
+    if exec_error is not None:
+        CURRENT_STAGE = "code_generation"
+
+        raise ValueError("First graph image not properly generated in the error iteration budget.")
 
     CURRENT_STAGE = "feedback"
     (
