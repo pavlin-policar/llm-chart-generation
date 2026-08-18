@@ -36,7 +36,8 @@
         "code_generation": {
             "parameters": {
                 "reasoning": false,
-                "tools": true
+                "tools": true,
+                "error_iterations": 3
             }
         },
         "feedback": {
