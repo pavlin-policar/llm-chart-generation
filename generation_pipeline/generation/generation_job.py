@@ -36,6 +36,10 @@ CURRENT_STAGE = None
 
 
 def log_error(stage, error):
+
+    if getattr(error, "_already_logged", False):
+        return
+
     if ERROR_PATH is not None:
         with open(ERROR_PATH, "a", encoding="utf-8") as file:
             file.write(
@@ -48,6 +52,8 @@ def log_error(stage, error):
                 )
                 + "\n"
             )
+
+    error._already_logged = True
 
 
 def define_llm_clients():

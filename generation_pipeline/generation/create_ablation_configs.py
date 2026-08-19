@@ -40,7 +40,7 @@ if __name__ == "__main__":
 
     # Set all to false for complete baseline
     for k in stages.keys():
-        if (k == "dataset_usability" and args.fixed_datasets) or k != "feedback":
+        if (k == "dataset_usability" and args.fixed_datasets) or k == "feedback":
             continue
         if "parameters" in stages[k].keys():
             stages[k]["parameters"]["reasoning"] = False

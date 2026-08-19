@@ -15,7 +15,7 @@
     "variable_replacement": {
       "active": true,
       "parameters": {
-        "reasoning": false
+        "reasoning": true
       }
     },
     "graph_types_generation": {
