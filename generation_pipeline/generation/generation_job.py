@@ -1,6 +1,8 @@
 import argparse
+import copy
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -16,12 +18,12 @@ from calls import (
     generate_graph_questions,
     give_question_types,
     graph_call,
+    graph_error_call,
+    graph_evaluation_call,
     graphs_call,
     plan_call,
     recode_call,
     replace_vars_call,
-    graph_evaluation_call,
-    graph_error_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
@@ -36,10 +38,16 @@ CURRENT_STAGE = None
 def log_error(stage, error):
     if ERROR_PATH is not None:
         with open(ERROR_PATH, "a", encoding="utf-8") as file:
-            file.write(json.dumps({
-                "stage": stage,
-                "error": f"{type(error).__name__}: {error}",
-            }, ensure_ascii=False) + "\n")
+            file.write(
+                json.dumps(
+                    {
+                        "stage": stage,
+                        "error": f"{type(error).__name__}: {error}",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
 
 def define_llm_clients():
@@ -144,6 +152,8 @@ def replace_variables(llm, dataset_sem, df):
     print("Replacing variables...")
 
     old_names = list(df.columns)
+    original_sem = copy.deepcopy(dataset_sem)
+
     try:
         new_names = replace_vars_call(
             llm,
@@ -154,15 +164,35 @@ def replace_variables(llm, dataset_sem, df):
         if len(new_names) != len(old_names):
             raise ValueError("Replacement feature count does not match the dataset")
 
+        if not all(isinstance(name, str) and name.strip() for name in new_names):
+            raise ValueError("Replacement feature names must be non-empty strings")
+
+        new_names = [name.strip() for name in new_names]
+
+        if len(set(new_names)) != len(new_names):
+            raise ValueError("Replacement feature names must be unique")
+
+        rename_map = dict(zip(old_names, new_names))
+
         df.columns = new_names
-        for old, new in zip(old_names, new_names):
-            dataset_sem["description"] = dataset_sem["description"].replace(old, new)
-            features_json = json.dumps(dataset_sem["features"]).replace(old, new)
-            dataset_sem["features"] = json.loads(features_json)
+        for feature in dataset_sem.get("features", []):
+            old_name = feature.get("name")
+            if old_name in rename_map:
+                feature["name"] = rename_map[old_name]
+
+        pattern = re.compile(r"(?<!\w)(" + "|".join(re.escape(name) for name in sorted(old_names, key=len, reverse=True)) + r")(?!\w)")
+        dataset_sem["description"] = pattern.sub(
+            lambda match: rename_map[match.group(0)],
+            dataset_sem["description"],
+        )
+
     except Exception as error:
         df.columns = old_names
+        dataset_sem.clear()
+        dataset_sem.update(original_sem)
         log_error("variable_replacement", error)
         print(f"Couldn't replace variable names... {error}")
+
         return None, old_names
 
     return old_names, new_names
@@ -172,11 +202,7 @@ def get_start_index(start_index, images_folder):
     if start_index != -1:
         return start_index
 
-    return sum(
-        1
-        for file_name in os.listdir(images_folder)
-        if file_name.endswith("_it0.png")
-    )
+    return sum(1 for file_name in os.listdir(images_folder) if file_name.endswith("_it0.png"))
 
 
 def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None):
@@ -190,7 +216,7 @@ def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None
 
             if dataset_sem.get("features") is None:
                 dataset_sem["features"] = ""
-            
+
             usable = True
 
             if stage_is_active(stages, "dataset_usability") and preselect_id is None:
@@ -216,7 +242,6 @@ def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None
             else:
                 print("Skipping usability check.")
 
-            
             if stage_is_active(stages, "format_description"):
                 description_llm = select_llm(
                     stages,
@@ -273,29 +298,17 @@ def generate_graph_types(
                 "num_graphs",
             )
 
-            creativity = stage_parameter(
-                stages,
-                "graph_types_generation",
-                "creativity"
-            )
+            creativity = stage_parameter(stages, "graph_types_generation", "creativity")
 
             alpha, beta = 2, 4
 
             if creativity == "random" or type(creativity) not in (int, float):
-                alpha = stage_parameter(
-                    stages,
-                    "graph_types_generation",
-                    "alpha"
-                )
+                alpha = stage_parameter(stages, "graph_types_generation", "alpha")
 
-                beta = stage_parameter(
-                    stages,
-                    "graph_types_generation",
-                    "beta"
-                )
+                beta = stage_parameter(stages, "graph_types_generation", "beta")
 
                 creativity = None
-                                
+
             graph_types = graphs_call(
                 graph_types_llm,
                 json.dumps(head_json),
@@ -303,7 +316,7 @@ def generate_graph_types(
                 num_graphs,
                 creativity=creativity,
                 alpha=alpha,
-                beta=beta
+                beta=beta,
             )
 
             for graph_type in graph_types:
@@ -317,21 +330,37 @@ def generate_graph_types(
 
 
 def execute_graph_code(code, df, selected_plot, graph_file_path):
+
+    if os.path.exists(graph_file_path):
+        os.remove(graph_file_path)
+
     exec_namespace = {
         "df": df,
         "selected_plot": selected_plot,
         "graph_file_path": graph_file_path,
         "__builtins__": __builtins__,
     }
+
     exec(code, exec_namespace, exec_namespace)
 
     if not os.path.exists(graph_file_path):
         raise ValueError("Generated code did not save image")
 
-    return (
-        exec_namespace.get("graph_data"),
-        exec_namespace.get("graph_df"),
-    )
+    graph_data = exec_namespace.get("graph_data")
+    graph_df = exec_namespace.get("graph_df")
+
+    if not isinstance(graph_data, dict):
+        raise ValueError("Generated code did not define graph_data as a dictionary")
+
+    try:
+        json.dumps(graph_data)
+    except (TypeError, ValueError) as error:
+        raise ValueError("graph_data is not JSON-serializable") from error
+
+    if not isinstance(graph_df, type(df)):
+        raise ValueError("Generated code did not define graph_df as a pandas DataFrame")
+
+    return graph_data, graph_df
 
 
 def review_and_regenerate(
@@ -348,17 +377,13 @@ def review_and_regenerate(
     graph_number,
     graph_count,
     time_start,
-    rating_threshold
+    rating_threshold,
 ):
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
     regeneration_active = stage_is_active(stages, "code_regeneration")
 
-    max_iterations = (
-        stage_parameter(stages, "code_regeneration", "iterations")
-        if regeneration_active
-        else 0
-    )
+    max_iterations = stage_parameter(stages, "code_regeneration", "iterations") if regeneration_active else 0
 
     num_code_error_regen = stage_parameter(stages, "code_generation", "error_iterations")
 
@@ -372,7 +397,7 @@ def review_and_regenerate(
 
     while True:
         previous_graph_file_path = graph_file_path
-        
+
         if not skip_evaluation:
             try:
                 feedback = graph_evaluation_call(
@@ -405,10 +430,7 @@ def review_and_regenerate(
 
             except Exception as error:
                 log_error("graph_evaluation", error)
-                feedback_text = (
-                    f"Graph evaluation failed with "
-                    f"{type(error).__name__}: {error}"
-                )
+                feedback_text = f"Graph evaluation failed with {type(error).__name__}: {error}"
 
                 images.append(
                     {
@@ -466,7 +488,6 @@ def review_and_regenerate(
             exec_error = None
 
             while True:
-
                 try:
                     graph_data, graph_df = execute_graph_code(
                         code,
@@ -477,16 +498,16 @@ def review_and_regenerate(
 
                     exec_error = None
                     last_valid_code = code
-                    
+
                     break
 
                 except Exception as e:
-
                     exec_error = e
+                    log_error("code_regeneration", exec_error)
 
                     if iterations_error >= num_code_error_regen:
                         break
-        
+
                     code = graph_error_call(
                         recode_llm,
                         dataset_sem.get("features"),
@@ -495,28 +516,21 @@ def review_and_regenerate(
                         previous_code=code,
                         execution_error=str(exec_error),
                         df=df,
-                        use_tools=stage_uses_tools(stages, "code_regeneration")
-                    ) 
+                        use_tools=stage_uses_tools(stages, "code_regeneration"),
+                    )
 
                 iterations_error += 1
 
             if exec_error is not None:
                 raise ValueError("Failed code execution for iteration.")
-            
+
         except Exception as error:
             plt.close("all")
             log_error("code_regeneration", error)
 
-            feedback_text = (
-                "The regenerated graph code failed during execution. "
-                "Fix the following error:\n"
-                f"{type(error).__name__}: {error}"
-            )
+            feedback_text = f"The regenerated graph code failed during execution. Fix the following error:\n{type(error).__name__}: {error}"
 
-            print(
-                f"Graph {graph_number}/{graph_count} regeneration "
-                f"{iteration} failed: {error}"
-            )
+            print(f"Graph {graph_number}/{graph_count} regeneration {iteration} failed: {error}")
 
             # No new image was produced, so record this iteration using the
             # last successfully created image and its matching code.
@@ -677,11 +691,9 @@ def generate_graph(
     )
 
     plt.style.use(selected_plot["style"])
-    CURRENT_STAGE = "code_execution"
 
     while True:
-
-        try: 
+        try:
             graph_data, graph_df = execute_graph_code(
                 code,
                 df,
@@ -695,6 +707,8 @@ def generate_graph(
         except Exception as e:
             exec_error = e
 
+            log_error("code_generation", exec_error)
+
             if iterations_error >= num_code_error_regen:
                 break
 
@@ -706,7 +720,7 @@ def generate_graph(
                 previous_code=code,
                 execution_error=str(exec_error),
                 df=df,
-                use_tools=stage_uses_tools(stages, "code_generation")
+                use_tools=stage_uses_tools(stages, "code_generation"),
             )
 
         iterations_error += 1
@@ -739,7 +753,7 @@ def generate_graph(
         time_start,
         rating_threshold,
     )
-    
+
     graph_data = regenerated_data if regenerated_data is not None else graph_data
     graph_df = regenerated_df if regenerated_df is not None else graph_df
 
@@ -809,17 +823,7 @@ def generate_graph(
     print(f"Finished graph... Time: {(time.perf_counter() - time_start):.04f}")
     CURRENT_STAGE = "metadata"
     return build_metadata(
-        dataset_id,
-        dataset_sem,
-        old_names,
-        new_names,
-        selected_plot,
-        description,
-        code,
-        graph_data,
-        questions,
-        images,
-        image_id
+        dataset_id, dataset_sem, old_names, new_names, selected_plot, description, code, graph_data, questions, images, image_id
     )
 
 
@@ -843,7 +847,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
     os.makedirs(images_folder, exist_ok=True)
 
     metadata_path = os.path.join(dataset_folder, args.metadata_file)
-    error_file = args.metadata_file.replace("metadata", "error", 1)
+    error_file = "error_" + args.metadata_file
     ERROR_PATH = os.path.join(dataset_folder, error_file)
     start_index = get_start_index(args.start_index, images_folder)
     image_index = start_index
@@ -856,9 +860,8 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
     rng = np.random.default_rng(args.seed)
     datasets_meta = openml_list_uci()
 
-
     datasets_iter = iter(dataset_ids or [])
- 
+
     print("Start generation...")
     while image_index < target_index:
         ds_id = None
@@ -869,11 +872,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                 print("No more fixed datasets available.")
                 break
 
-        (
-            dataset_id,
-            df,
-            dataset_sem
-        ) = select_dataset(datasets_meta, rng, stages, llm, llm_think, ds_id)
+        (dataset_id, df, dataset_sem) = select_dataset(datasets_meta, rng, stages, llm, llm_think, ds_id)
 
         if dataset_id is None and args.fixed_datasets:
             print(f"Skipping fixed dataset {ds_id}.")
@@ -888,6 +887,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                 llm,
                 llm_think,
             )
+
             old_names, new_names = replace_variables(
                 replacement_llm,
                 dataset_sem,
@@ -932,6 +932,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                     append_metadata(metadata_path, metadata)
                     image_index += 1
                     break
+
                 except Exception as error:
                     log_error(CURRENT_STAGE or "graph_generation", error)
                     print(f"Error generating graph, retrying ({retry}/{MAX_GRAPH_RETRIES})... {error}")

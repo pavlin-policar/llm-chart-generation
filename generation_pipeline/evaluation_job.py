@@ -100,8 +100,10 @@ if __name__ == "__main__":
     model_path_check = os.path.join(args.model_path, args.check_model_name)
 
     # MAIN_DIR is the directory of the repository
-    MAIN_DIR = Path(__file__).resolve().parent
-    DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
+    MAIN_DIR = Path(__file__).resolve().parent.parent
+    DATASET_ROOT = os.path.join(MAIN_DIR, "dataset")
+    METADATA_PATH = os.path.join(DATASET_ROOT, args.metadata_file)
+    DATASET_FOLDER = os.path.dirname(METADATA_PATH)
     IMAGES_FOLDER = os.path.join(DATASET_FOLDER, "images")
     EVAL_FOLDER = os.path.join(MAIN_DIR, "evaluation")
 
@@ -109,7 +111,7 @@ if __name__ == "__main__":
     os.makedirs(EVAL_FOLDER, exist_ok=True)
 
     # Read the metadatafile and store the neccessary fields.
-    with open(os.path.join(DATASET_FOLDER, args.metadata_file)) as f:
+    with open(METADATA_PATH) as f:
         
         questions_all = []
 

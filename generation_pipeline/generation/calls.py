@@ -58,7 +58,7 @@ class GraphEvaluation(StrictModel):
             "rendering_error",
             "other",
         ]
-    ] = Field(min_length=1)
+    ]
     feedback: str
 
 

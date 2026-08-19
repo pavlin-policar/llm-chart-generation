@@ -246,8 +246,10 @@ if __name__ == "__main__":
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
 
     # MAIN_DIR is set to the git repository folder
-    MAIN_DIR = Path(__file__).resolve().parent
-    DATASET_FOLDER = os.path.join(MAIN_DIR, "dataset")
+    MAIN_DIR = Path(__file__).resolve().parent.parent
+    DATASET_ROOT = os.path.join(MAIN_DIR, "dataset")
+    METADATA_PATH = os.path.join(DATASET_ROOT, args.metadata_file)
+    DATASET_FOLDER = os.path.dirname(METADATA_PATH)
     EVAL_FOLDER = os.path.join(MAIN_DIR, "evaluation")
 
     questions_all = []
@@ -264,7 +266,7 @@ if __name__ == "__main__":
     cost_grading = 0
 
     # Read the metadatafile and store the neccessary fields.
-    with open(os.path.join(DATASET_FOLDER, args.metadata_file), encoding="utf-8") as f:
+    with open(METADATA_PATH, encoding="utf-8") as f:
         for line in tqdm(f, desc="Loading metadata"):
             graph = json.loads(line)
 
