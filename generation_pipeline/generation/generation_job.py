@@ -25,6 +25,7 @@ from calls import (
     recode_call,
     replace_vars_call,
 )
+from vllm_openai import VLLMChatOpenAI
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import message_to_dict
@@ -145,20 +146,26 @@ def log_error(stage, error):
 
 
 def define_llm_clients():
-    llm = ChatOpenAI(
-        model="qwen3.5",
-        openai_api_key="EMPTY",
-        openai_api_base=API_URL,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        callbacks=[LLM_CALL_COLLECTOR],
-    )
-
-    llm_think = ChatOpenAI(
+    llm = VLLMChatOpenAI(
         model="qwen3.5",
         openai_api_key="EMPTY",
         openai_api_base=API_URL,
         extra_body={
-            "chat_template_kwargs": {"enable_thinking": True},
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+            }
+        },
+        callbacks=[LLM_CALL_COLLECTOR],
+    )
+
+    llm_think = VLLMChatOpenAI(
+        model="qwen3.5",
+        openai_api_key="EMPTY",
+        openai_api_base=API_URL,
+        extra_body={
+            "chat_template_kwargs": {
+                "enable_thinking": True,
+            },
             "logit_bias": {
                 "248069": 5.0,
             },
@@ -604,6 +611,8 @@ def review_and_regenerate(
                     if iterations_error >= num_code_error_regen:
                         break
 
+                    print(f"Error executing regenerated code (error iteration {iterations_error}/{num_code_error_regen}): ", str(exec_error))
+
                     code = graph_error_call(
                         recode_llm,
                         dataset_sem.get("features"),
@@ -808,6 +817,8 @@ def generate_graph(
 
             if iterations_error >= num_code_error_regen:
                 break
+
+            print(f"Error executing generated code (error iteration {iterations_error}/{num_code_error_regen}):", str(exec_error))
 
             code = graph_error_call(
                 code_llm,
