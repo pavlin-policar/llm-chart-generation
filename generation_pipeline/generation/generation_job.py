@@ -28,7 +28,7 @@ from calls import (
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
 
-API_URL = "http://ixb2:8000/v1"
+API_URL = "http://0.0.0.0:8888/v1"  # "http://ixb2:8000/v1"
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
@@ -528,7 +528,7 @@ def review_and_regenerate(
                 iterations_error += 1
 
             if exec_error is not None:
-                raise ValueError("Failed code execution for iteration.")
+                raise exec_error
 
         except Exception as error:
             plt.close("all")
@@ -734,7 +734,7 @@ def generate_graph(
     if exec_error is not None:
         CURRENT_STAGE = "code_generation"
 
-        raise ValueError("First graph image not properly generated in the error iteration budget.")
+        raise exec_error
 
     CURRENT_STAGE = "feedback"
     (

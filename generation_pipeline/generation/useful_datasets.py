@@ -22,7 +22,7 @@ def parse_args():
         "--datasets",
         type=int,
         default=10,
-        help="Number of datasets to generate graphs for.",
+        help="Number of datasets to select.",
     )
     return parser.parse_args()
 
