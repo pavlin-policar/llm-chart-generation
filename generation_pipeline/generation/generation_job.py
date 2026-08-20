@@ -26,6 +26,8 @@ from calls import (
     replace_vars_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import message_to_dict
 from langchain_openai import ChatOpenAI
 
 API_URL = "http://0.0.0.0:8888/v1"  # "http://ixb2:8000/v1"
@@ -33,6 +35,92 @@ MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
 CURRENT_STAGE = None
+
+
+def json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return json_safe(value.model_dump(mode="json"))
+    return str(value)
+
+
+def sanitize_llm_input(value):
+    if isinstance(value, str) and value.startswith("data:image/") and ";base64," in value:
+        return "[image inserted]"
+    if isinstance(value, dict):
+        return {key: sanitize_llm_input(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_llm_input(item) for item in value]
+    return value
+
+
+def get_reasoning(message):
+    reasoning = message.additional_kwargs.get("reasoning_content")
+    if reasoning is not None:
+        return json_safe(reasoning)
+
+    if isinstance(message.content, str):
+        match = re.search(r"<think>(.*?)</think>", message.content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+class LLMCallCollector(BaseCallbackHandler):
+    def __init__(self):
+        self.calls = None
+        self.pending = {}
+
+    def start(self, initial_calls=None):
+        self.calls = list(initial_calls or [])
+        self.pending = {}
+
+    def stop(self):
+        calls = self.calls or []
+        self.calls = None
+        self.pending = {}
+        return calls
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        if self.calls is None:
+            return
+
+        call = {
+            "input": [[sanitize_llm_input(json_safe(message_to_dict(message))) for message in batch] for batch in messages],
+            "output": None,
+        }
+        self.calls.append(call)
+        self.pending[str(run_id)] = call
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        call = self.pending.pop(str(run_id), None)
+        if call is None:
+            return
+
+        generation = response.generations[0][0]
+        if hasattr(generation, "message"):
+            message = generation.message
+            call["output"] = json_safe(message_to_dict(message))["data"]
+            call["output"]["reasoning"] = get_reasoning(message)
+        else:
+            call["output"] = {
+                "content": json_safe(generation),
+                "reasoning": None,
+            }
+
+    def on_llm_error(self, error, *, run_id, **kwargs):
+        call = self.pending.pop(str(run_id), None)
+        if call is not None:
+            call["error"] = f"{type(error).__name__}: {error}"
+
+
+LLM_CALL_COLLECTOR = LLMCallCollector()
 
 
 def log_error(stage, error):
@@ -62,6 +150,7 @@ def define_llm_clients():
         openai_api_key="EMPTY",
         openai_api_base=API_URL,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        callbacks=[LLM_CALL_COLLECTOR],
     )
 
     llm_think = ChatOpenAI(
@@ -74,6 +163,7 @@ def define_llm_clients():
                 "248069": 5.0,
             },
         },
+        callbacks=[LLM_CALL_COLLECTOR],
     )
 
     return llm, llm_think
@@ -556,12 +646,9 @@ def review_and_regenerate(
             )
 
             if iteration >= max_iterations:
-                # Do not return failed code paired with a valid older image.
                 code = last_valid_code
                 break
 
-            # The failed regeneration attempt has already been recorded.
-            # Skip evaluating the unchanged previous image again.
             skip_evaluation = True
             continue
 
@@ -608,6 +695,7 @@ def build_metadata(
     questions,
     images,
     image_id,
+    llm_calls,
 ):
     return {
         "id": str(uuid.uuid4()),
@@ -629,6 +717,7 @@ def build_metadata(
             "questions": questions,
         },
         "images": images,
+        "llm_calls": llm_calls,
     }
 
 
@@ -648,9 +737,11 @@ def generate_graph(
     llm,
     llm_think,
     rating_threshold,
+    initial_llm_calls,
 ):
     global CURRENT_STAGE
 
+    LLM_CALL_COLLECTOR.start(initial_llm_calls)
     time_start = time.perf_counter()
     selected_plot = graph_types[graph_index]
     image_id = f"{job_id}_{image_index}"
@@ -828,8 +919,20 @@ def generate_graph(
 
     print(f"Finished graph... Time: {(time.perf_counter() - time_start):.04f}")
     CURRENT_STAGE = "metadata"
+    llm_calls = LLM_CALL_COLLECTOR.stop()
     return build_metadata(
-        dataset_id, dataset_sem, old_names, new_names, selected_plot, description, code, graph_data, questions, images, image_id
+        dataset_id,
+        dataset_sem,
+        old_names,
+        new_names,
+        selected_plot,
+        description,
+        code,
+        graph_data,
+        questions,
+        images,
+        image_id,
+        llm_calls,
     )
 
 
@@ -870,6 +973,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
 
     print("Start generation...")
     while image_index < target_index:
+        LLM_CALL_COLLECTOR.start()
         ds_id = None
         if args.fixed_datasets:
             try:
@@ -909,6 +1013,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
             llm,
             llm_think,
         )
+        initial_llm_calls = LLM_CALL_COLLECTOR.stop()
         if graph_types is None:
             continue
 
@@ -934,6 +1039,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                         llm,
                         llm_think,
                         args.rating_threshold,
+                        initial_llm_calls,
                     )
                     append_metadata(metadata_path, metadata)
                     image_index += 1
