@@ -7,7 +7,9 @@ chart detail page is opened.
 
 The grid and detail view display chart acceptance, the sidebar can filter by
 accepted or non-accepted charts, and each selected iteration shows its feedback
-directly above its code.
+directly above its code. Each chart detail also joins typed `llm_calls` messages,
+marks included images, displays provider reasoning traces, and retains access to
+the exact payload stored in its source `metadata.jsonl` record.
 
 The dataset metrics panel compares cumulative acceptance at each iteration and
 generation errors for every generation-dataset folder. They are displayed on a

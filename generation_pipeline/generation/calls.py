@@ -171,7 +171,10 @@ def format_dataset_description_call(llm, metadata) -> dict:
     response = invoke_structured_llm(llm, prompt, DatasetDescription)
     return response.model_dump()
 
-def graphs_call(llm, features: dict, dataset_description: str, num_graphs:int, creativity:float, alpha:float, beta:float) -> list[dict]:  # Reasoning
+
+def graphs_call(
+    llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float
+) -> list[dict]:  # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
     The specifications consist of graph type, short description, and features that should be used.
@@ -187,7 +190,6 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs:int, c
 
     else:
         creat = np.random.beta(alpha, beta)
-    
 
     # TODO: implement amount of graphs chosen based on dataset
 
@@ -207,8 +209,8 @@ def graphs_call(llm, features: dict, dataset_description: str, num_graphs:int, c
         "- Do NOT include plots that would be extremely hard to read and don't make sense semantically (e.g., a bar plot with many tiny bars, a line plot of very scattered data, etc.)\n"
         "- Do NOT repeat plot types.\n"
         "- Do NOT generate code.\n"
-        "- Do NOT describe the plots.\n\n"
-        "- DO NOT propose plots with many different subplots. It should contain a maximum of 5 subplots per row and 5 per column."
+        "- Do NOT describe the plots.\n"
+        "- DO NOT propose plots with too many different subplots. It should contain a maximum of 5 subplots per row and 5 per column."
         "Output format (STRICT):\n"
         "- Return ONLY a valid JSON array.\n"
         "- Each element must be a JSON object with EXACTLY these keys:\n"
@@ -402,10 +404,7 @@ def graph_call(
     )
 
     if plan is not None:
-        code_prompt += (
-            f"\nPLAN from planning agent:\n"
-            f"{json.dumps(plan, ensure_ascii=False)}\n"
-        )
+        code_prompt += f"\nPLAN from planning agent:\n{json.dumps(plan, ensure_ascii=False)}\n"
 
     out = invoke_llm(llm, code_prompt, df, use_tools).content
 
@@ -500,6 +499,7 @@ def recode_call(
 
     return code
 
+
 def graph_error_call(
     llm,
     features,
@@ -522,24 +522,21 @@ def graph_error_call(
         "You are a plot code repair agent.\n"
         "You are given Python code that was intended to render a plot but failed during execution.\n"
         "Your job is to fix the execution error while preserving the intended visualization.\n\n"
-
         "Repair rules:\n"
         "- Treat the PREVIOUS CODE as the source of truth for the intended visualization.\n"
         "- Fix ONLY problems necessary for the code to execute successfully.\n"
         "- Preserve the current plot type, features, transformations, aggregation, "
         "binning, filters, axes, and visual semantics as much as possible.\n"
         "- Do NOT redesign, simplify, or semantically improve the chart unless required to fix the error.\n"
-        '- Do NOT change plot type.\n'
+        "- Do NOT change plot type.\n"
         '- Use ONLY the columns listed in selected_plot["features"].\n'
         "- You may derive temporary helper columns ONLY from those listed features.\n"
         "- Save the plot with plt.savefig(); the path is available in a variable named "
         "`graph_file_path`. Use this variable but do not change it.\n\n"
-
         "Libraries:\n"
         "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. "
         "Do NOT use seaborn!\n"
         "- Do NOT use pandas plotting; always use matplotlib directly.\n\n"
-
         "CRITICAL: The corrected code must still define BOTH:\n"
         "1) A pandas DataFrame named `graph_df` containing the FINAL PROCESSED DATA actually used for plotting.\n"
         "2) A JSON-serializable dict named `graph_data` with EXACTLY these keys (all keys required):\n\n"
@@ -560,7 +557,6 @@ def graph_error_call(
         '  "n_rows_plotted": int,\n'
         '  "title": string\n'
         "}\n\n"
-
         "Validation rules:\n"
         "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
         "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
@@ -568,15 +564,12 @@ def graph_error_call(
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Return the COMPLETE corrected code, not a patch or explanation.\n\n"
-
         "Inputs you must rely on:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
         f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n\n"
-
         "PREVIOUS CODE:\n"
         f"{previous_code}\n\n"
-
         "EXECUTION ERROR:\n"
         f"{execution_error}\n"
     )
@@ -590,6 +583,7 @@ def graph_error_call(
 
     code = strip_code_fences(out)
     return code
+
 
 def graph_evaluation_call(
     llm,
@@ -683,7 +677,7 @@ def graph_evaluation_call(
         "concrete code-level fix that preserves the chart type\n"
         "\n"
         "Rules:\n"
-        '- Rating 5 with no issue: use an empty array [] and an empty feedback string.\n'
+        "- Rating 5 with no issue: use an empty array [] and an empty feedback string.\n"
         "- Ratings 1-2: feedback must explain why regeneration is warranted and give "
         "a concrete fix.\n"
         "- Ratings 3-4: feedback may mention meaningful issues that do not require "
@@ -701,9 +695,7 @@ def graph_evaluation_call(
             {"type": "text", "text": f"CODE:\n{plot_code}"},
             {
                 "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{img_b64}"
-                },
+                "image_url": {"url": f"data:image/png;base64,{img_b64}"},
             },
         ]
     )

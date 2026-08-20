@@ -48,7 +48,9 @@ RESULTS_DIR=/path/to/results \
 - Sorting by original order or number of incorrect model answers.
 - Detail view with iteration images, visible per-iteration feedback directly
   above the iteration code, acceptance status, descriptions, structured
-  data, questions, and per-model answers.
+  data, joined and typed LLM messages, image placeholders, reasoning traces,
+  and access to the exact raw JSON from `metadata.jsonl`, plus questions and
+  per-model answers.
 - URL query parameters preserve filters, sorting, page, and selected chart.
 
 ## Caching

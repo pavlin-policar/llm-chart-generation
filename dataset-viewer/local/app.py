@@ -957,6 +957,255 @@ _GRID_CSS = """
 """
 
 
+def _llm_call_label(index: int, call: object, has_reasoning: bool = False) -> str:
+    """Build a compact selector label from the call's model and token usage."""
+    parts = [f"Call {index + 1}"]
+    if not isinstance(call, dict):
+        return parts[0]
+
+    output = call.get("output")
+    if not isinstance(output, dict):
+        return parts[0]
+
+    response_metadata = output.get("response_metadata")
+    response_metadata = response_metadata if isinstance(response_metadata, dict) else {}
+    model = response_metadata.get("model_name")
+    if model:
+        parts.append(str(model))
+
+    usage = output.get("usage_metadata")
+    usage = usage if isinstance(usage, dict) else {}
+    token_usage = response_metadata.get("token_usage")
+    token_usage = token_usage if isinstance(token_usage, dict) else {}
+    total_tokens = usage.get("total_tokens", token_usage.get("total_tokens"))
+    if isinstance(total_tokens, (int, float)):
+        parts.append(f"{total_tokens:,.0f} tokens")
+    if has_reasoning:
+        parts.append("reasoning")
+    return " · ".join(parts)
+
+
+def _llm_input_messages(value: object) -> list[tuple[str, object]]:
+    """Flatten common LangChain/OpenAI input envelopes into role/content pairs."""
+    messages: list[tuple[str, object]] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+
+        data = node.get("data")
+        if isinstance(data, dict) and "content" in data:
+            role = node.get("type") or data.get("role") or data.get("type") or "message"
+            messages.append((str(role), data["content"]))
+            return
+        if "content" in node and ("role" in node or "type" in node):
+            role = node.get("role") or node.get("type") or "message"
+            messages.append((str(role), node["content"]))
+            return
+
+        for child in node.values():
+            walk(child)
+
+    walk(value)
+    return messages
+
+
+def _llm_image_placeholder(block: dict) -> str | None:
+    """Return a safe summary for an image block without printing its URL/data."""
+    block_type = str(block.get("type", "")).lower()
+    source = block.get("source")
+    source = source if isinstance(source, dict) else {}
+    image_url = block.get("image_url")
+    image_url = image_url if isinstance(image_url, dict) else {}
+    media_type = (
+        block.get("media_type")
+        or block.get("mime_type")
+        or source.get("media_type")
+        or source.get("mime_type")
+    )
+    looks_like_image = (
+        "image" in block_type
+        or "image" in block
+        or "image_url" in block
+        or str(media_type or "").lower().startswith("image/")
+    )
+    if not looks_like_image:
+        return None
+
+    details: list[str] = []
+    url = str(image_url.get("url") or block.get("url") or "")
+    if not media_type and url.startswith("data:image/"):
+        media_type = url[5:].split(";", 1)[0]
+    if media_type:
+        details.append(str(media_type))
+
+    detail = image_url.get("detail") or block.get("detail")
+    if detail:
+        details.append(f"detail={detail}")
+    width, height = block.get("width"), block.get("height")
+    if width and height:
+        details.append(f"{width}×{height}")
+    if not details:
+        details.append("embedded data" if url.startswith("data:") else "URL reference")
+    return f"[Image included: {', '.join(details)}]"
+
+
+def _llm_content_text(value: object) -> str:
+    """Convert message content blocks into readable text and image markers."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return "[No content recorded]"
+    if isinstance(value, list):
+        parts = [_llm_content_text(part).strip() for part in value]
+        return "\n\n".join(part for part in parts if part) or "[No content recorded]"
+    if isinstance(value, dict):
+        image_placeholder = _llm_image_placeholder(value)
+        if image_placeholder:
+            return image_placeholder
+        for key in ("text", "input_text", "output_text", "content"):
+            if key in value:
+                return _llm_content_text(value[key])
+        keys = ", ".join(str(key) for key in value)
+        return f"[Structured content: {keys}]" if keys else "[Empty content object]"
+    return str(value)
+
+
+def _llm_joined_messages(messages: list[tuple[str, object]]) -> str:
+    """Join every message into one transcript while retaining its type."""
+    return "\n\n".join(
+        f"[{role}]\n{_llm_content_text(content)}"
+        for role, content in messages
+    )
+
+
+def _llm_reasoning_traces(value: object) -> list[tuple[str, str]]:
+    """Find and deduplicate reasoning traces regardless of provider nesting."""
+    reasoning_fields = {
+        "analysis",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "reasoning_trace",
+        "thinking",
+        "thinking_content",
+        "thinking_trace",
+    }
+    traces: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(path: str, content: object) -> None:
+        text = _llm_content_text(content).strip()
+        if not text or text == "[No content recorded]" or text in seen:
+            return
+        seen.add(text)
+        traces.append((path, text))
+
+    def walk(node: object, path: str) -> None:
+        if isinstance(node, list):
+            for index, child in enumerate(node):
+                walk(child, f"{path}[{index}]")
+            return
+        if not isinstance(node, dict):
+            return
+
+        block_type = str(node.get("type", "")).lower()
+        if block_type in {"analysis", "reasoning", "thinking"}:
+            for key in ("text", "content", "reasoning", "thinking"):
+                if key in node:
+                    add(path, node[key])
+                    break
+
+        for key, child in node.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            normalized_key = str(key).lower()
+            if (
+                normalized_key in reasoning_fields
+                and isinstance(child, (str, list, dict))
+                and child
+            ):
+                add(child_path, child)
+            else:
+                walk(child, child_path)
+
+    walk(value, "call")
+    return traces
+
+
+def _render_llm_content(value: object) -> None:
+    """Show text with decoded whitespace; fall back to JSON for structured data."""
+    if isinstance(value, str):
+        st.code(value, language="text", wrap_lines=True)
+    elif value is None:
+        st.caption("No content recorded.")
+    else:
+        st.json(value, expanded=False)
+
+
+def render_llm_calls(rec: dict) -> None:
+    """Render readable call contents plus the exact metadata.jsonl payload."""
+    llm_calls = rec.get("llm_calls")
+    if not isinstance(llm_calls, list):
+        llm_calls = [llm_calls] if llm_calls else []
+
+    st.subheader(f"LLM calls ({len(llm_calls)})")
+    if not llm_calls:
+        st.caption("No LLM calls are recorded for this chart.")
+        return
+
+    reasoning_by_call = [_llm_reasoning_traces(call) for call in llm_calls]
+    reasoning_call_count = sum(bool(traces) for traces in reasoning_by_call)
+    st.caption(
+        f"Reasoning traces are recorded for {reasoning_call_count} of "
+        f"{len(llm_calls)} calls in this chart."
+    )
+    selected_index = st.selectbox(
+        "LLM call",
+        options=range(len(llm_calls)),
+        format_func=lambda index: _llm_call_label(
+            index,
+            llm_calls[index],
+            bool(reasoning_by_call[index]),
+        ),
+        key=f"llm_call_{rec.get('id', 'chart')}",
+    )
+    selected_call = llm_calls[selected_index]
+
+    if isinstance(selected_call, dict):
+        with st.expander("Input", expanded=False):
+            messages = _llm_input_messages(selected_call.get("input"))
+            if messages:
+                _render_llm_content(_llm_joined_messages(messages))
+            else:
+                _render_llm_content(_llm_content_text(selected_call.get("input")))
+
+        reasoning_traces = reasoning_by_call[selected_index]
+        with st.expander("Reasoning trace", expanded=False):
+            if reasoning_traces:
+                _render_llm_content("\n\n".join(
+                    f"[{path}]\n{trace}" for path, trace in reasoning_traces
+                ))
+            else:
+                st.caption("No separate reasoning trace is recorded for this call.")
+
+        with st.expander("Output", expanded=False):
+            output = selected_call.get("output")
+            if isinstance(output, dict):
+                _render_llm_content(_llm_content_text(output.get("content")))
+            else:
+                _render_llm_content(_llm_content_text(output))
+    else:
+        _render_llm_content(selected_call)
+
+    with st.expander("View raw JSON for all LLM calls", expanded=False):
+        st.caption("Unmodified `llm_calls` payload from this chart's metadata.jsonl record.")
+        st.json(llm_calls, expanded=False)
+
+
 def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int, int]]]]) -> None:
     gid = rec["id"]
     chart_block = rec.get("graph", {})
@@ -1110,6 +1359,8 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
             with st.expander("Structured data (JSON)"):
                 st.json(sd, expanded=False)
 
+    st.markdown("---")
+    render_llm_calls(rec)
     st.markdown("---")
     render_questions(gid, chart_block.get("questions", []) or [], result_indexes)
 
