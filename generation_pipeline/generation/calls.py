@@ -92,19 +92,22 @@ class QuestionTypes(
     pass
 
 
-def invoke_llm(llm, messages, df=None, use_tools=False):
+def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None):
+    config = {"metadata": call_metadata} if call_metadata else None
     if use_tools and df is not None:
-        return invoke_with_dataframe_tools(llm, messages, df)
-    return llm.invoke(messages)
+        return invoke_with_dataframe_tools(llm, messages, df, config=config)
+    return llm.invoke(messages, config=config)
 
 
-def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False):
+def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False, call_metadata=None):
+    config = {"metadata": call_metadata} if call_metadata else None
     if use_tools and df is not None:
         response = invoke_with_dataframe_tools(
             llm,
             messages,
             df,
             response_format=schema,
+            config=config,
         )
         parsed = response.additional_kwargs.get("parsed")
         if parsed is None:
@@ -114,10 +117,10 @@ def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False):
     return llm.with_structured_output(
         schema,
         method="json_schema",
-    ).invoke(messages)
+    ).invoke(messages, config=config)
 
 
-def determine_dataset_usability_call(llm, metadata) -> dict:
+def determine_dataset_usability_call(llm, metadata, call_metadata=None) -> dict:
     """
     Determines whether the dataset is suitable for generating meaningful
     visualizations.
@@ -140,11 +143,11 @@ def determine_dataset_usability_call(llm, metadata) -> dict:
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
-    response = invoke_structured_llm(llm, prompt, DatasetUsability)
+    response = invoke_structured_llm(llm, prompt, DatasetUsability, call_metadata=call_metadata)
     return response.model_dump()
 
 
-def format_dataset_description_call(llm, metadata) -> dict:
+def format_dataset_description_call(llm, metadata, call_metadata=None) -> dict:
     """
     Converts the dataset metadata into a clean, readable description.
     """
@@ -168,12 +171,12 @@ def format_dataset_description_call(llm, metadata) -> dict:
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
-    response = invoke_structured_llm(llm, prompt, DatasetDescription)
+    response = invoke_structured_llm(llm, prompt, DatasetDescription, call_metadata=call_metadata)
     return response.model_dump()
 
 
 def graphs_call(
-    llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float
+    llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float, call_metadata=None
 ) -> list[dict]:  # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
@@ -230,11 +233,11 @@ def graphs_call(
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    response = invoke_structured_llm(llm, prompt, GraphSpecs)
+    response = invoke_structured_llm(llm, prompt, GraphSpecs, call_metadata=call_metadata)
     return [spec.model_dump() for spec in response.root]
 
 
-def replace_vars_call(llm, features: dict, dataset_description: str) -> list[str]:  # No reasoning
+def replace_vars_call(llm, features: dict, dataset_description: str, call_metadata=None) -> list[str]:  # No reasoning
     """
     Calls LLM -> replaces feature names in the dataset with a more semantically meaningful equaivalent.
     """
@@ -254,11 +257,11 @@ def replace_vars_call(llm, features: dict, dataset_description: str) -> list[str
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    response = invoke_structured_llm(llm, prompt, FeatureNames)
+    response = invoke_structured_llm(llm, prompt, FeatureNames, call_metadata=call_metadata)
     return response.root
 
 
-def compute_info_call(llm, features, selected_plot, head):  # No reasoning
+def compute_info_call(llm, features, selected_plot, head, call_metadata=None):  # No reasoning
     """
     Calls LLM -> returns detailed instructions on how to make a specified plot.
 
@@ -298,13 +301,13 @@ def compute_info_call(llm, features, selected_plot, head):  # No reasoning
         f"HEAD:\n {json.dumps(head)}"
     )
 
-    out = llm.invoke(prompt).content
+    out = invoke_llm(llm, prompt, call_metadata=call_metadata).content
     _, out = after_think(out)
 
     return out
 
 
-def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
+def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metadata=None) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
         "You will be given:\n"
@@ -329,6 +332,7 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False) -> str:
         PlotPlan,
         df,
         use_tools,
+        call_metadata,
     )
     return json.dumps(response.model_dump(), ensure_ascii=False)
 
@@ -341,6 +345,7 @@ def graph_call(
     plan,
     df=None,
     use_tools=False,
+    call_metadata=None,
 ) -> str:  # No reasoning plan, reasoning code
     """
     Calls LLM -> generates the code needed to plot the graph.
@@ -406,7 +411,7 @@ def graph_call(
     if plan is not None:
         code_prompt += f"\nPLAN from planning agent:\n{json.dumps(plan, ensure_ascii=False)}\n"
 
-    out = invoke_llm(llm, code_prompt, df, use_tools).content
+    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata).content
 
     try:
         _, out = after_think(out)
@@ -425,6 +430,7 @@ def recode_call(
     corrections,
     df=None,
     use_tools=False,
+    call_metadata=None,
 ) -> dict:  # Reasoning
     """
     Calls LLM -> given the previous code and and the feedback, regenerate the code to hopefully fix the mistakes.
@@ -492,7 +498,7 @@ def recode_call(
         f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
 
-    out = invoke_llm(llm, prompt, df, use_tools).content
+    out = invoke_llm(llm, prompt, df, use_tools, call_metadata).content
     _, out = after_think(out)
 
     code = out.replace("```python", "").replace("```", "")
@@ -509,6 +515,7 @@ def graph_error_call(
     execution_error,
     df=None,
     use_tools=False,
+    call_metadata=None,
 ) -> str:
     """
     Calls LLM -> repairs graph code that failed during execution.
@@ -574,7 +581,7 @@ def graph_error_call(
         f"{execution_error}\n"
     )
 
-    out = invoke_llm(llm, code_prompt, df, use_tools).content
+    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata).content
 
     try:
         _, out = after_think(out)
@@ -589,6 +596,7 @@ def graph_evaluation_call(
     llm,
     image_path: str,
     plot_code: str,
+    call_metadata=None,
 ) -> dict:
     """
     Evaluates whether a graph is good enough for the final dataset.
@@ -700,7 +708,7 @@ def graph_evaluation_call(
         ]
     )
 
-    response = invoke_structured_llm(llm, [msg], GraphEvaluation)
+    response = invoke_structured_llm(llm, [msg], GraphEvaluation, call_metadata=call_metadata)
     return response.model_dump()
 
 
@@ -713,6 +721,7 @@ def describe_graph_png(
     dataset_desc,
     plot_description,
     use_tools=False,
+    call_metadata=None,
 ) -> str:  # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
@@ -814,6 +823,7 @@ def describe_graph_png(
         GraphDescription,
         graph_df,
         use_tools,
+        call_metadata,
     )
     return response.description
 
@@ -827,6 +837,7 @@ def generate_graph_questions(
     num,
     graph_df=None,
     use_tools=False,
+    call_metadata=None,
 ) -> list[dict]:  # Reasoning
     """
     Calls LLM -> given the image, dataset desctiption, metadata and full graph description,
@@ -903,6 +914,7 @@ def generate_graph_questions(
         GraphQuestions,
         graph_df,
         use_tools,
+        call_metadata,
     )
     if len(response.questions) != num:
         raise ValueError(f"Expected {num} questions, received {len(response.questions)}")
@@ -918,6 +930,7 @@ def generate_graph_question_one(
     previous_questions,
     graph_df=None,
     use_tools=False,
+    call_metadata=None,
 ) -> dict:
     """Generate one chart question using all previous questions as context."""
 
@@ -975,11 +988,12 @@ def generate_graph_question_one(
         GraphQuestion,
         graph_df,
         use_tools,
+        call_metadata,
     )
     return response.model_dump()
 
 
-def give_question_types(llm, questions):  # No reasoning
+def give_question_types(llm, questions, call_metadata=None):  # No reasoning
     """
     Calls LLM -> categorizes questions into types, for better evaluation.
 
@@ -1002,5 +1016,5 @@ def give_question_types(llm, questions):  # No reasoning
         f"{json.dumps(questions, indent=2)}"
     )
 
-    response = invoke_structured_llm(llm, prompt, QuestionTypes)
+    response = invoke_structured_llm(llm, prompt, QuestionTypes, call_metadata=call_metadata)
     return response.root

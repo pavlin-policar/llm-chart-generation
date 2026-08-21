@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from call_collector import LLMCallCollector
 from calls import (
     describe_graph_png,
     determine_dataset_usability_call,
@@ -25,100 +26,13 @@ from calls import (
     recode_call,
     replace_vars_call,
 )
-from vllm_openai import VLLMChatOpenAI
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import message_to_dict
-from langchain_openai import ChatOpenAI
+from vllm_openai import VLLMChatOpenAI
 
-API_URL = "http://0.0.0.0:8888/v1"  # "http://ixb2:8000/v1"
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
 CURRENT_STAGE = None
-
-
-def json_safe(value):
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_safe(item) for item in value]
-    if hasattr(value, "model_dump"):
-        return json_safe(value.model_dump(mode="json"))
-    return str(value)
-
-
-def sanitize_llm_input(value):
-    if isinstance(value, str) and value.startswith("data:image/") and ";base64," in value:
-        return "[image inserted]"
-    if isinstance(value, dict):
-        return {key: sanitize_llm_input(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [sanitize_llm_input(item) for item in value]
-    return value
-
-
-def get_reasoning(message):
-    reasoning = message.additional_kwargs.get("reasoning_content")
-    if reasoning is not None:
-        return json_safe(reasoning)
-
-    if isinstance(message.content, str):
-        match = re.search(r"<think>(.*?)</think>", message.content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-
-    return None
-
-
-class LLMCallCollector(BaseCallbackHandler):
-    def __init__(self):
-        self.calls = None
-        self.pending = {}
-
-    def start(self, initial_calls=None):
-        self.calls = list(initial_calls or [])
-        self.pending = {}
-
-    def stop(self):
-        calls = self.calls or []
-        self.calls = None
-        self.pending = {}
-        return calls
-
-    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
-        if self.calls is None:
-            return
-
-        call = {
-            "input": [[sanitize_llm_input(json_safe(message_to_dict(message))) for message in batch] for batch in messages],
-            "output": None,
-        }
-        self.calls.append(call)
-        self.pending[str(run_id)] = call
-
-    def on_llm_end(self, response, *, run_id, **kwargs):
-        call = self.pending.pop(str(run_id), None)
-        if call is None:
-            return
-
-        generation = response.generations[0][0]
-        if hasattr(generation, "message"):
-            message = generation.message
-            call["output"] = json_safe(message_to_dict(message))["data"]
-            call["output"]["reasoning"] = get_reasoning(message)
-        else:
-            call["output"] = {
-                "content": json_safe(generation),
-                "reasoning": None,
-            }
-
-    def on_llm_error(self, error, *, run_id, **kwargs):
-        call = self.pending.pop(str(run_id), None)
-        if call is not None:
-            call["error"] = f"{type(error).__name__}: {error}"
 
 
 LLM_CALL_COLLECTOR = LLMCallCollector()
@@ -145,11 +59,11 @@ def log_error(stage, error):
     error._already_logged = True
 
 
-def define_llm_clients():
+def define_llm_clients(api_url, model_name):
     llm = VLLMChatOpenAI(
-        model="qwen3.5",
+        model=model_name,
         openai_api_key="EMPTY",
-        openai_api_base=API_URL,
+        openai_api_base=api_url,
         extra_body={
             "chat_template_kwargs": {
                 "enable_thinking": False,
@@ -159,9 +73,9 @@ def define_llm_clients():
     )
 
     llm_think = VLLMChatOpenAI(
-        model="qwen3.5",
+        model=model_name,
         openai_api_key="EMPTY",
-        openai_api_base=API_URL,
+        openai_api_base=api_url,
         extra_body={
             "chat_template_kwargs": {
                 "enable_thinking": True,
@@ -225,6 +139,18 @@ def parse_args(default_seed):
         default=3,
         help="Minimum rating for which the graph is accepted.",
     )
+    parser.add_argument(
+        "--api_url",
+        type=int,
+        default="http://0.0.0.0:8888/v1",
+        help="URL of the vLLM OpenAI API endpoint.",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=int,
+        default="qwen3.5",
+        help="Name of the model hosted on the vLLM server",
+    )
     return parser.parse_args()
 
 
@@ -262,6 +188,7 @@ def replace_variables(llm, dataset_sem, df):
             llm,
             dataset_sem.get("features"),
             dataset_sem["description"],
+            call_metadata={"stage_name": "variable_replacement"},
         )
 
         if len(new_names) != len(old_names):
@@ -334,6 +261,7 @@ def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None
                 usability = determine_dataset_usability_call(
                     usability_llm,
                     dataset_sem,
+                    call_metadata={"stage_name": "dataset_usability"},
                 )
 
                 usable = usability["useful"]
@@ -356,6 +284,7 @@ def select_dataset(datasets_meta, rng, stages, llm, llm_think, preselect_id=None
                 description = format_dataset_description_call(
                     description_llm,
                     dataset_sem,
+                    call_metadata={"stage_name": "format_description"},
                 )["description"]
 
                 dataset_sem["description"] = description
@@ -420,6 +349,7 @@ def generate_graph_types(
                 creativity=creativity,
                 alpha=alpha,
                 beta=beta,
+                call_metadata={"stage_name": "graph_types_generation"},
             )
 
             for graph_type in graph_types:
@@ -507,6 +437,10 @@ def review_and_regenerate(
                     feedback_llm,
                     graph_file_path,
                     code,
+                    call_metadata={
+                        "stage_name": "feedback",
+                        "regeneration_iteration": iteration,
+                    },
                 )
 
                 feedback_text = feedback["feedback"]
@@ -583,6 +517,10 @@ def review_and_regenerate(
                     stages,
                     "code_regeneration",
                 ),
+                call_metadata={
+                    "stage_name": "code_regeneration",
+                    "regeneration_iteration": iteration,
+                },
             )
 
             plt.close("all")
@@ -611,7 +549,9 @@ def review_and_regenerate(
                     if iterations_error >= num_code_error_regen:
                         break
 
-                    print(f"Error executing regenerated code (error iteration {iterations_error}/{num_code_error_regen}): ", str(exec_error))
+                    print(
+                        f"Error executing regenerated code (error iteration {iterations_error}/{num_code_error_regen}): ", str(exec_error)
+                    )
 
                     code = graph_error_call(
                         recode_llm,
@@ -622,6 +562,11 @@ def review_and_regenerate(
                         execution_error=str(exec_error),
                         df=df,
                         use_tools=stage_uses_tools(stages, "code_regeneration"),
+                        call_metadata={
+                            "stage_name": "code_regeneration",
+                            "regeneration_iteration": iteration,
+                            "error_iteration": iterations_error,
+                        },
                     )
 
                 iterations_error += 1
@@ -678,7 +623,11 @@ def label_questions(questions, stages, llm, llm_think):
         labels = []
         rerun_labels = 0
         while len(labels) != len(questions):
-            labels = give_question_types(labeling_llm, questions)
+            labels = give_question_types(
+                labeling_llm,
+                questions,
+                call_metadata={"stage_name": "question_labeling"},
+            )
             rerun_labels += 1
             if rerun_labels > 30:
                 for question in questions:
@@ -777,6 +726,7 @@ def generate_graph(
             selected_plot,
             df=df,
             use_tools=stage_uses_tools(stages, "plan_code_generation"),
+            call_metadata={"stage_name": "plan_code_generation"},
         )
 
     CURRENT_STAGE = "code_generation"
@@ -794,6 +744,7 @@ def generate_graph(
         plan,
         df=df,
         use_tools=stage_uses_tools(stages, "code_generation"),
+        call_metadata={"stage_name": "code_generation"},
     )
 
     plt.style.use(selected_plot["style"])
@@ -829,6 +780,10 @@ def generate_graph(
                 execution_error=str(exec_error),
                 df=df,
                 use_tools=stage_uses_tools(stages, "code_generation"),
+                call_metadata={
+                    "stage_name": "code_generation",
+                    "error_iteration": iterations_error,
+                },
             )
 
         iterations_error += 1
@@ -887,6 +842,7 @@ def generate_graph(
             dataset_sem["description"],
             selected_plot["description"],
             use_tools=stage_uses_tools(stages, "description"),
+            call_metadata={"stage_name": "description"},
         )
 
         CURRENT_STAGE = "questions"
@@ -907,6 +863,7 @@ def generate_graph(
                     questions,
                     graph_df=graph_df,
                     use_tools=stage_uses_tools(stages, "questions"),
+                    call_metadata={"stage_name": "questions"},
                 )
 
                 questions.append(quest)
@@ -921,6 +878,7 @@ def generate_graph(
                 num_questions,
                 graph_df=graph_df,
                 use_tools=stage_uses_tools(stages, "questions"),
+                call_metadata={"stage_name": "questions"},
             )
 
         CURRENT_STAGE = "question_labeling"
@@ -1080,7 +1038,7 @@ def main():
         args.parameters_file,
     )
     stages = load_pipeline(parameters_path)["stages"]
-    llm, llm_think = define_llm_clients()
+    llm, llm_think = define_llm_clients(args.api_url, args.model_name)
 
     datasets_good_file = os.path.join(main_dir, "generation_pipeline", "generation", "configs", "good_datasets.jsonl")
     dataset_ids = None

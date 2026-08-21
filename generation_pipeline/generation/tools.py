@@ -208,7 +208,7 @@ def create_dataframe_tools(df):
     return [run_pandas]
 
 
-def invoke_with_dataframe_tools(llm, messages, df, response_format=None):
+def invoke_with_dataframe_tools(llm, messages, df, response_format=None, config=None):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
     tools = create_dataframe_tools(df)
@@ -220,7 +220,7 @@ def invoke_with_dataframe_tools(llm, messages, df, response_format=None):
     history = list(messages) if isinstance(messages, list) else [HumanMessage(content=messages)]
 
     for _ in range(MAX_TOOL_CALLS):
-        response = tool_llm.invoke(history)
+        response = tool_llm.invoke(history, config=config)
         history.append(response)
 
         if not response.tool_calls:
@@ -244,4 +244,4 @@ def invoke_with_dataframe_tools(llm, messages, df, response_format=None):
             )
 
     history.append(HumanMessage(content="Tool-call limit reached. Return the requested final answer now."))
-    return tool_llm.invoke(history)
+    return tool_llm.invoke(history, config=config)
