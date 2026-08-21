@@ -306,7 +306,6 @@ def compute_info_call(llm, features, selected_plot, head, call_metadata=None):  
 
     return out
 
-
 def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metadata=None) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
@@ -336,6 +335,18 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metad
     )
     return json.dumps(response.model_dump(), ensure_ascii=False)
 
+CODE_TOOL_INSTRUCTIONS = (
+    "TOOL USAGE REQUIREMENTS:\n"
+    "- Tools are only for inspecting data and validating code. A tool result is NEVER the final answer.\n"
+    "- You MUST validate the complete candidate code with `execute_plot_code`.\n"
+    "- If execution fails, correct the COMPLETE code and validate it again.\n"
+    "- When execution succeeds, your next response MUST contain exactly the complete Python code passed to the successful tool call.\n"
+    "- Do NOT call another tool after successful execution.\n"
+    "- Do NOT summarize, explain, confirm success, or describe the resulting chart.\n"
+    "- Do NOT return phrases such as \"the plot was successfully rendered.\"\n"
+    "- The final output must contain ONLY the code and no other text.\n"
+    "- The final response must still define `graph_df` and `graph_data` and save the image to `graph_file_path`.\n\n"
+)
 
 def graph_call(
     llm,
@@ -403,6 +414,12 @@ def graph_call(
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Use large enough figures; use plt.tight_layout().\n\n"
+    )
+
+    if use_tools:
+        code_prompt += CODE_TOOL_INSTRUCTIONS
+
+    code_prompt += (
         "Inputs you must rely on:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
@@ -438,7 +455,7 @@ def recode_call(
 
     """
 
-    prompt = (
+    code_prompt = (
         "You are a plot rendering agent.\n"
         "You are given:\n"
         "1) A pandas DataFrame named `df`.\n"
@@ -493,6 +510,12 @@ def recode_call(
         "- Do NOT mutate selected_plot in any way in general.\n"
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n\n"
+    )
+
+    if use_tools:
+        code_prompt += CODE_TOOL_INSTRUCTIONS
+
+    code_prompt += (
         "Inputs you must rely on:\n"
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
@@ -500,10 +523,10 @@ def recode_call(
         f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
 
-    out = invoke_llm(llm, prompt, df, use_tools, call_metadata, selected_plot).content
+    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata, selected_plot).content
     _, out = after_think(out)
 
-    code = out.replace("```python", "").replace("```", "")
+    code = strip_code_fences(out)
 
     return code
 
@@ -577,10 +600,20 @@ def graph_error_call(
         f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
         f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
         f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n\n"
-        "PREVIOUS CODE:\n"
-        f"{previous_code}\n\n"
-        "EXECUTION ERROR:\n"
-        f"{execution_error}\n"
+        "PREVIOUS CODE:\n"f"{previous_code}\n\n"
+        "EXECUTION ERROR:\n"f"{execution_error}\n"
+    )
+
+    if use_tools:
+        code_prompt += CODE_TOOL_INSTRUCTIONS
+
+    code_prompt += (
+        "Inputs you must rely on:\n"
+        f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
+        f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
+        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n\n"
+        "PREVIOUS CODE:\n"f"{previous_code}\n\n"
+        "EXECUTION ERROR:\n"f"{execution_error}\n"
     )
 
     out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata, selected_plot).content

@@ -141,13 +141,13 @@ def parse_args(default_seed):
     )
     parser.add_argument(
         "--api_url",
-        type=int,
+        type=str,
         default="http://0.0.0.0:8888/v1",
         help="URL of the vLLM OpenAI API endpoint.",
     )
     parser.add_argument(
         "--model_name",
-        type=int,
+        type=str,
         default="qwen3.5",
         help="Name of the model hosted on the vLLM server",
     )

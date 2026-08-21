@@ -13,13 +13,22 @@ def after_think(text: str):
 
 def strip_code_fences(s: str) -> str:
     """
-    Strip python and json tags from LLM output.
+    If a ```python, ```json, or plain ``` code block is present,
+    return only the content inside it.
+    Otherwise, return the original stripped string.
     """
     s = s.strip()
-    s = re.sub(r"^```(?:json|python)?\s*", "", s)
-    s = re.sub(r"\s*```$", "", s)
-    return s.strip()
 
+    match = re.search(
+        r"```(?:python|json)?\s*(.*?)\s*```",
+        s,
+        flags=re.DOTALL,
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return s
 
 # DATASET HELPERS
 
