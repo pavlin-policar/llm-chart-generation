@@ -6,7 +6,7 @@ import numpy as np
 from helpers import after_think, strip_code_fences
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, RootModel
-from tools import invoke_with_dataframe_tools
+from tools import invoke_with_tools
 
 
 class StrictModel(BaseModel):
@@ -92,17 +92,17 @@ class QuestionTypes(
     pass
 
 
-def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None):
+def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None, selected_plot=None):
     config = {"metadata": call_metadata} if call_metadata else None
     if use_tools and df is not None:
-        return invoke_with_dataframe_tools(llm, messages, df, config=config)
+        return invoke_with_tools(llm, messages, df, config=config, selected_plot=selected_plot)
     return llm.invoke(messages, config=config)
 
 
 def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False, call_metadata=None):
     config = {"metadata": call_metadata} if call_metadata else None
     if use_tools and df is not None:
-        response = invoke_with_dataframe_tools(
+        response = invoke_with_tools(
             llm,
             messages,
             df,
@@ -399,6 +399,7 @@ def graph_call(
         '  ALWAYS keep graph_data["features_expected"] unchanged.\n'
         '- Do NOT change selected_plot["type"].\n'
         '- Do NOT use columns outside selected_plot["features"].\n'
+        "- Do NOT mutate selected_plot in any way in general.\n"
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Use large enough figures; use plt.tight_layout().\n\n"
@@ -411,7 +412,7 @@ def graph_call(
     if plan is not None:
         code_prompt += f"\nPLAN from planning agent:\n{json.dumps(plan, ensure_ascii=False)}\n"
 
-    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata).content
+    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata, selected_plot).content
 
     try:
         _, out = after_think(out)
@@ -489,6 +490,7 @@ def recode_call(
         'that still matches selected_plot["type"] but uses the remaining provided features only; '
         'ALWAYS keep graph_data["features_expected"] unchanged.\n'
         '- Do NOT use columns outside selected_plot["features"].\n'
+        "- Do NOT mutate selected_plot in any way in general.\n"
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n\n"
         "Inputs you must rely on:\n"
@@ -498,7 +500,7 @@ def recode_call(
         f"corrections: {json.dumps(corrections or '', ensure_ascii=False)}\n"
     )
 
-    out = invoke_llm(llm, prompt, df, use_tools, call_metadata).content
+    out = invoke_llm(llm, prompt, df, use_tools, call_metadata, selected_plot).content
     _, out = after_think(out)
 
     code = out.replace("```python", "").replace("```", "")
@@ -581,7 +583,7 @@ def graph_error_call(
         f"{execution_error}\n"
     )
 
-    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata).content
+    out = invoke_llm(llm, code_prompt, df, use_tools, call_metadata, selected_plot).content
 
     try:
         _, out = after_think(out)

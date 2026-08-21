@@ -54,12 +54,12 @@ class LLMCallCollector(BaseCallbackHandler):
         self.pending = {}
         return calls
 
-    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+    def on_chat_model_start(self, serialized, messages, *, run_id, metadata=None, **kwargs):
         if self.calls is None:
             return
 
         call = {
-            "metadata": json_safe(kwargs.get("metadata") or {}),
+            "metadata": json_safe(metadata or {}),
             "input": [[sanitize_llm_input(json_safe(message_to_dict(message))) for message in batch] for batch in messages],
             "output": None,
         }

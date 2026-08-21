@@ -1,5 +1,7 @@
 import ast
 import json
+import os
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -208,10 +210,43 @@ def create_dataframe_tools(df):
     return [run_pandas]
 
 
-def invoke_with_dataframe_tools(llm, messages, df, response_format=None, config=None):
+def create_code_execution_tool(df, selected_plot):
+    @tool
+    def execute_plot_code(code: str) -> str:
+        """Execute plotting code with `df`, `selected_plot`, and `graph_file_path` available.
+
+        Returns the execution error and whether a non-empty image was created.
+        """
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file_path = os.path.join(temp_dir, "graph.png")
+            namespace = {
+                "df": df.copy(deep=True),
+                "selected_plot": selected_plot,
+                "graph_file_path": graph_file_path,
+                "__builtins__": __builtins__,
+            }
+            error = None
+            try:
+                exec(compile(code, "<plot-code-tool>", "exec"), namespace, namespace)
+            except Exception as exception:
+                error = f"{type(exception).__name__}: {exception}"
+
+            image_created = os.path.isfile(graph_file_path) and os.path.getsize(graph_file_path) > 0
+            if error is None and not image_created:
+                error = "Generated code did not save an image"
+
+            return json.dumps({"error": error, "image_created_successfully": error is None and image_created})
+
+    return execute_plot_code
+
+
+def invoke_with_tools(llm, messages, df, response_format=None, config=None, selected_plot=None):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
     tools = create_dataframe_tools(df)
+    if selected_plot is not None:
+        tools.append(create_code_execution_tool(df, selected_plot))
     tools_by_name = {dataframe_tool.name: dataframe_tool for dataframe_tool in tools}
     bind_kwargs = {}
     if response_format is not None:

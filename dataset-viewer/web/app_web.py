@@ -815,14 +815,26 @@ def chart_detail_urls(chart_row: dict, manifest: dict) -> tuple[str, str, str]:
 
 
 def _llm_call_label(index: int, call: object, has_reasoning: bool = False) -> str:
-    """Build a compact selector label from the call's model and token usage."""
+    """Build a compact selector label from the call's stage, iterations, model, and token usage."""
     parts = [f"Call {index + 1}"]
     if not isinstance(call, dict):
         return parts[0]
 
+    metadata = call.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    stage_name = metadata.get("stage_name")
+    if stage_name:
+        parts.append(str(stage_name))
+    regeneration_iteration = metadata.get("regeneration_iteration")
+    if regeneration_iteration is not None:
+        parts.append(f"regeneration {regeneration_iteration}")
+    error_iteration = metadata.get("error_iteration")
+    if error_iteration is not None:
+        parts.append(f"error {error_iteration}")
+
     output = call.get("output")
     if not isinstance(output, dict):
-        return parts[0]
+        return " · ".join(parts)
 
     response_metadata = output.get("response_metadata")
     response_metadata = response_metadata if isinstance(response_metadata, dict) else {}
