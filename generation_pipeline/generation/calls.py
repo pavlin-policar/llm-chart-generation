@@ -62,6 +62,32 @@ class GraphEvaluation(StrictModel):
     feedback: str
 
 
+class GraphEvaluationError(StrictModel):
+    type: Literal[
+        "none",
+        "uninformative",
+        "variable_semantics",
+        "aggregation_transformation",
+        "misleading_encoding",
+        "excessive_cardinality",
+        "missing_invalid_data",
+        "visibility",
+        "overlap_clutter",
+        "distinguishability",
+        "scaling_layout",
+        "missing_elements",
+        "rendering_error",
+        "other",
+    ]
+    severity: int = Field(ge=1, le=5)
+    description: str
+    feedback: str
+
+
+class PerErrorGraphEvaluation(StrictModel):
+    errors: list[GraphEvaluationError]
+
+
 class GraphDescription(StrictModel):
     description: str = Field(min_length=1)
 
@@ -632,13 +658,14 @@ def graph_evaluation_call(
     image_path: str,
     plot_code: str,
     call_metadata=None,
+    feedback_type: Literal["rating", "per_error"] = "rating",
 ) -> dict:
     """
     Evaluates whether a graph is good enough for the final dataset.
     If it is not, returns concrete feedback for the next regeneration.
     """
 
-    evaluation_prompt = (
+    fixed_evaluation_prompt = (
         "You are a visualization QA reviewer.\n"
         "\n"
         "You will be given:\n"
@@ -688,6 +715,9 @@ def graph_evaluation_call(
         "\n"
         "Do not nitpick minor aesthetic issues.\n"
         "\n"
+    )
+
+    rating_evaluation_prompt = (
         "Rating scale:\n"
         "- 5: Excellent; no meaningful problems.\n"
         "- 4: Good; minor issues only, fully usable.\n"
@@ -729,6 +759,52 @@ def graph_evaluation_call(
         "- Do NOT suggest changing the chart type. This is very important, so you MUST NOT suggest changing the chart type.\n"
     )
 
+    per_error_evaluation_prompt = (
+        "Error types:\n"
+        "- uninformative\n"
+        "- variable_semantics\n"
+        "- aggregation_transformation\n"
+        "- misleading_encoding\n"
+        "- excessive_cardinality\n"
+        "- missing_invalid_data\n"
+        "- visibility\n"
+        "- overlap_clutter\n"
+        "- distinguishability\n"
+        "- scaling_layout\n"
+        "- missing_elements\n"
+        "- rendering_error\n"
+        "- other\n"
+        "\n"
+        "Severity levels:\n"
+        "- 1: A nice-to-have improvement, such as better coloring or aesthetics.\n"
+        "- 2: A minor issue; the chart remains usable and interpretable.\n"
+        "- 3: A meaningful issue that harms interpretation and warrants regeneration.\n"
+        "- 4: A major issue that severely harms interpretation.\n"
+        "- 5: The chart is completely unreadable or impossible to interpret.\n"
+        "\n"
+        'Output ONLY valid JSON with exactly one key, "errors", containing a list of errors.\n'
+        "Each error must have exactly these keys:\n"
+        '  - "type": one applicable error type from the list above\n'
+        '  - "severity": integer from 1 to 5\n'
+        '  - "description": concise description of the fault\n'
+        '  - "feedback": very short, broad instructions for how to fix it while preserving the chart type\n'
+        "\n"
+        "Rules:\n"
+        '- If there are no errors, return {"errors": []}.\n'
+        "- Report each distinct fault separately.\n"
+        "- Include faults only; do NOT include any positive feedback, Markdown, or extra text.\n"
+        "- Do NOT suggest changing the chart type. This is very important, so you MUST NOT suggest changing the chart type.\n"
+    )
+
+    if feedback_type == "rating":
+        evaluation_prompt = fixed_evaluation_prompt + rating_evaluation_prompt
+        evaluation_schema = GraphEvaluation
+    elif feedback_type == "per_error":
+        evaluation_prompt = fixed_evaluation_prompt + per_error_evaluation_prompt
+        evaluation_schema = PerErrorGraphEvaluation
+    else:
+        raise ValueError(f"Unsupported feedback_type: {feedback_type}")
+
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
@@ -743,7 +819,7 @@ def graph_evaluation_call(
         ]
     )
 
-    response = invoke_structured_llm(llm, [msg], GraphEvaluation, call_metadata=call_metadata)
+    response = invoke_structured_llm(llm, [msg], evaluation_schema, call_metadata=call_metadata)
     return response.model_dump()
 
 

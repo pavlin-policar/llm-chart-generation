@@ -1005,6 +1005,72 @@ def _llm_reasoning_traces(value: object) -> list[tuple[str, str]]:
     return traces
 
 
+def _llm_tool_calls(call: object) -> list[dict]:
+    if not isinstance(call, dict):
+        return []
+    output = call.get("output")
+    if not isinstance(output, dict):
+        return []
+    tool_calls = output.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        additional_kwargs = output.get("additional_kwargs")
+        additional_kwargs = additional_kwargs if isinstance(additional_kwargs, dict) else {}
+        tool_calls = additional_kwargs.get("tool_calls")
+    return [tool_call for tool_call in tool_calls or [] if isinstance(tool_call, dict)]
+
+
+def _llm_call_groups(llm_calls: list[object]) -> list[list[object]]:
+    """Group adjacent model turns that belong to the same tool-use call."""
+    groups: list[list[object]] = []
+    for call in llm_calls:
+        if groups and _llm_tool_calls(groups[-1][-1]):
+            previous = groups[-1][-1]
+            previous_metadata = previous.get("metadata") if isinstance(previous, dict) else None
+            current_metadata = call.get("metadata") if isinstance(call, dict) else None
+            if previous_metadata == current_metadata:
+                groups[-1].append(call)
+                continue
+        groups.append([call])
+    return groups
+
+
+def _llm_group_trace(group: list[object]) -> tuple[list[str], bool]:
+    """Build one chronological reasoning/tool transcript for a logical call."""
+    sections: list[str] = []
+    has_reasoning = False
+
+    for turn_index, call in enumerate(group):
+        output = call.get("output") if isinstance(call, dict) else None
+        for _, trace in _llm_reasoning_traces(output):
+            has_reasoning = True
+            sections.append(f"[Turn {turn_index + 1} reasoning]\n{trace}")
+
+        tool_calls = _llm_tool_calls(call)
+        if not tool_calls:
+            continue
+
+        current_messages = _llm_input_messages(call.get("input")) if isinstance(call, dict) else []
+        current_tool_count = sum(role.lower() == "tool" for role, _ in current_messages)
+        next_messages = (
+            _llm_input_messages(group[turn_index + 1].get("input"))
+            if turn_index + 1 < len(group) and isinstance(group[turn_index + 1], dict)
+            else []
+        )
+        tool_results = [content for role, content in next_messages if role.lower() == "tool"][current_tool_count:]
+
+        for tool_index, tool_call in enumerate(tool_calls):
+            name = str(tool_call.get("name") or "tool")
+            arguments = json.dumps(tool_call.get("args", {}), ensure_ascii=False, indent=2, default=str)
+            sections.append(f"[Turn {turn_index + 1} tool call: {name}]\n{arguments}")
+            if tool_index < len(tool_results):
+                sections.append(
+                    f"[Turn {turn_index + 1} tool result: {name}]\n"
+                    f"{_llm_content_text(tool_results[tool_index])}"
+                )
+
+    return sections, has_reasoning
+
+
 def _render_llm_content(value: object) -> None:
     """Show text with decoded whitespace; fall back to JSON for structured data."""
     if isinstance(value, str):
@@ -1021,50 +1087,59 @@ def render_llm_calls(rec: dict) -> None:
     if not isinstance(llm_calls, list):
         llm_calls = [llm_calls] if llm_calls else []
 
-    st.subheader(f"LLM calls ({len(llm_calls)})")
     if not llm_calls:
+        st.subheader("LLM calls (0)")
         st.caption("No LLM calls are recorded for this chart.")
         return
 
-    reasoning_by_call = [_llm_reasoning_traces(call) for call in llm_calls]
-    reasoning_call_count = sum(bool(traces) for traces in reasoning_by_call)
+    call_groups = _llm_call_groups(llm_calls)
+    traces_by_group = [_llm_group_trace(group) for group in call_groups]
+    reasoning_call_count = sum(has_reasoning for _, has_reasoning in traces_by_group)
+    st.subheader(f"LLM calls ({len(call_groups)})")
     st.caption(
         f"Reasoning traces are recorded for {reasoning_call_count} of "
-        f"{len(llm_calls)} calls in this chart."
+        f"{len(call_groups)} logical calls in this chart "
+        f"({len(llm_calls)} model turns)."
     )
     selected_index = st.selectbox(
         "LLM call",
-        options=range(len(llm_calls)),
+        options=range(len(call_groups)),
         format_func=lambda index: _llm_call_label(
             index,
-            llm_calls[index],
-            bool(reasoning_by_call[index]),
-        ),
+            call_groups[index][0],
+            traces_by_group[index][1],
+        ) + (f" · {len(call_groups[index])} turns" if len(call_groups[index]) > 1 else ""),
         key=f"llm_call_{rec.get('id', 'chart')}",
     )
-    selected_call = llm_calls[selected_index]
+    selected_group = call_groups[selected_index]
+    selected_call = selected_group[-1]
+    initial_call = selected_group[0]
 
     if isinstance(selected_call, dict):
         with st.expander("Input", expanded=False):
-            messages = _llm_input_messages(selected_call.get("input"))
+            initial_input = initial_call.get("input") if isinstance(initial_call, dict) else initial_call
+            messages = _llm_input_messages(initial_input)
             if messages:
                 _render_llm_content(_llm_joined_messages(messages))
             else:
-                _render_llm_content(_llm_content_text(selected_call.get("input")))
+                _render_llm_content(_llm_content_text(initial_input))
 
-        reasoning_traces = reasoning_by_call[selected_index]
-        with st.expander("Reasoning trace", expanded=False):
-            if reasoning_traces:
-                _render_llm_content("\n\n".join(
-                    f"[{path}]\n{trace}" for path, trace in reasoning_traces
-                ))
+        trace_sections, _ = traces_by_group[selected_index]
+        with st.expander("Reasoning and tool use", expanded=False):
+            if trace_sections:
+                _render_llm_content("\n\n".join(trace_sections))
             else:
-                st.caption("No separate reasoning trace is recorded for this call.")
+                st.caption("No separate reasoning or tool use is recorded for this call.")
 
         with st.expander("Output", expanded=False):
             output = selected_call.get("output")
             if isinstance(output, dict):
-                _render_llm_content(_llm_content_text(output.get("content")))
+                content = output.get("content")
+                _render_llm_content(
+                    _llm_content_text(content)
+                    if content not in (None, "")
+                    else (_llm_tool_calls(selected_call) or content)
+                )
             else:
                 _render_llm_content(_llm_content_text(output))
     else:

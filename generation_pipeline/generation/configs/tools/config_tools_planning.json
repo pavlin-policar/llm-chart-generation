@@ -44,7 +44,8 @@
         },
         "feedback": {
             "parameters": {
-                "reasoning": false
+                "reasoning": false,
+                "feedback_type": "rating"
             }
         },
         "code_regeneration": {

@@ -414,6 +414,9 @@ def review_and_regenerate(
 ):
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
+    feedback_type = stage_parameter(stages, "feedback", "feedback_type")
+    if feedback_type not in ("rating", "per_error"):
+        raise ValueError(f"Unsupported feedback_type: {feedback_type}")
     regeneration_active = stage_is_active(stages, "code_regeneration")
 
     max_iterations = stage_parameter(stages, "code_regeneration", "iterations") if regeneration_active else 0
@@ -441,26 +444,39 @@ def review_and_regenerate(
                         "stage_name": "feedback",
                         "regeneration_iteration": iteration,
                     },
+                    feedback_type=feedback_type,
                 )
 
-                feedback_text = feedback["feedback"]
+                if feedback_type == "rating":
+                    feedback_text = feedback["feedback"]
+                    rating = int(feedback["rating"])
+                    accepted = rating >= rating_threshold
+                    error_types = feedback["error_type"]
+                else:
+                    errors = feedback["errors"]
+                    feedback_text = "\n".join(
+                        f"{error['type']} (severity {error['severity']}): "
+                        f"{error['description']} Fix: {error['feedback']}"
+                        for error in errors
+                    )
+                    rating = None
+                    accepted = not any(error["severity"] >= 3 for error in errors)
+                    error_types = [error["type"] for error in errors]
 
-                rating = int(feedback["rating"])
-                accepted = rating >= rating_threshold
-
-                images.append(
-                    {
-                        "path": os.path.relpath(
-                            graph_file_path,
-                            dataset_folder,
-                        ),
-                        "rating": rating,
-                        "feedback": feedback_text,
-                        "accept": accepted,
-                        "error_type": feedback["error_type"],
-                        "code": code,
-                    }
-                )
+                image = {
+                    "path": os.path.relpath(
+                        graph_file_path,
+                        dataset_folder,
+                    ),
+                    "rating": rating,
+                    "feedback": feedback_text,
+                    "accept": accepted,
+                    "error_type": error_types,
+                    "code": code,
+                }
+                if feedback_type == "per_error":
+                    image["errors"] = errors
+                images.append(image)
 
                 if accepted or iteration >= max_iterations:
                     break
