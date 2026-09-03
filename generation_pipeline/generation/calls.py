@@ -755,8 +755,8 @@ def graph_evaluation_call(
         "- scaling_layout\n"
         "- missing_elements\n"
         "- rendering_error\n"
-        "- spec_mismatch\n",
-        "- data_fidelity\n",
+        "- spec_mismatch\n"
+        "- data_fidelity\n"
         "- other\n"
         "\n"
         "Output ONLY valid JSON with exactly these keys:\n"
