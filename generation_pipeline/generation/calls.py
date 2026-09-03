@@ -56,6 +56,8 @@ class GraphEvaluation(StrictModel):
             "scaling_layout",
             "missing_elements",
             "rendering_error",
+            "spec_mismatch",
+            "data_fidelity",
             "other",
         ]
     ]
@@ -77,6 +79,8 @@ class GraphEvaluationError(StrictModel):
         "scaling_layout",
         "missing_elements",
         "rendering_error",
+        "spec_mismatch",
+        "data_fidelity",
         "other",
     ]
     severity: int = Field(ge=1, le=5)
@@ -741,6 +745,8 @@ def graph_evaluation_call(
         "- scaling_layout\n"
         "- missing_elements\n"
         "- rendering_error\n"
+        "- spec_mismatch\n",
+        "- data_fidelity\n",
         "- other\n"
         "\n"
         "Output ONLY valid JSON with exactly these keys:\n"
@@ -773,6 +779,8 @@ def graph_evaluation_call(
         "- scaling_layout\n"
         "- missing_elements\n"
         "- rendering_error\n"
+        "- spec_mismatch\n",
+        "- data_fidelity\n",
         "- other\n"
         "\n"
         "Severity levels:\n"

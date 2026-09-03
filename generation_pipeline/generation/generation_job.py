@@ -76,6 +76,7 @@ def define_llm_clients(api_url, model_name):
         model=model_name,
         openai_api_key="EMPTY",
         openai_api_base=api_url,
+        reasoning_effort="medium",
         extra_body={
             "chat_template_kwargs": {
                 "enable_thinking": True,
@@ -148,7 +149,7 @@ def parse_args(default_seed):
     parser.add_argument(
         "--model_name",
         type=str,
-        default="qwen3.5",
+        default="qwen3.8",
         help="Name of the model hosted on the vLLM server",
     )
     return parser.parse_args()
