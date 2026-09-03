@@ -1,0 +1,76 @@
+{
+  "stages": {
+    "dataset_usability": {
+      "active": true,
+      "parameters": {
+        "reasoning": false
+      }
+    },
+    "format_description": {
+      "active": true,
+      "parameters": {
+        "reasoning": false
+      }
+    },
+    "variable_replacement": {
+      "active": true,
+      "parameters": {
+        "reasoning": true
+      }
+    },
+    "graph_types_generation": {
+      "parameters": {
+        "creativity": "random",
+        "alpha": 2,
+        "beta": 4,
+        "reasoning": true,
+        "tools": false,
+        "num_graphs": 10,
+        "_comment": "Pass 'variable_per_dataset' for the LLM to choose number of graph types depending on the dataset."
+      }
+    },
+    "plan_code_generation": {
+      "active": true,
+      "parameters": {
+        "reasoning": false,
+        "tools": false
+      }
+    },
+    "code_generation": {
+      "parameters": {
+        "reasoning": true,
+        "tools": true,
+        "error_iterations": 3
+      }
+    },
+    "feedback": {
+      "parameters": {
+        "reasoning": true,
+        "feedback_type": "per_error"
+      }
+    },
+    "code_regeneration": {
+      "active": true,
+      "parameters": {
+        "reasoning": true,
+        "iterations": 5,
+        "tools": true
+      }
+    },
+    "description": {
+      "parameters": {
+        "reasoning": true,
+        "tools": false
+      }
+    },
+    "questions": {
+      "parameters": {
+        "reasoning": true,
+        "tools": false,
+        "num_questions": 20,
+        "one": false
+      }
+    },
+    "question_labeling": {}
+  }
+}

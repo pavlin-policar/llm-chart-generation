@@ -206,7 +206,8 @@ def format_dataset_description_call(llm, metadata, call_metadata=None) -> dict:
 
 
 def graphs_call(
-    llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float, call_metadata=None
+    llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float, call_metadata=None,
+    df=None, use_tools=False,
 ) -> list[dict]:  # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
@@ -263,7 +264,16 @@ def graphs_call(
         f"DATASET DESCRIPTION:\n{dataset_description}\n"
     )
 
-    response = invoke_structured_llm(llm, prompt, GraphSpecs, call_metadata=call_metadata)
+    if use_tools:
+        prompt += (
+            "\nYou may use run_pandas to inspect the full dataset before choosing plots "
+            "(for example, check missing values, category counts, and numeric ranges). "
+            "Your final answer must still contain only the requested plot specifications.\n"
+        )
+
+    response = invoke_structured_llm(
+        llm, prompt, GraphSpecs, df=df, use_tools=use_tools, call_metadata=call_metadata,
+    )
     return [spec.model_dump() for spec in response.root]
 
 

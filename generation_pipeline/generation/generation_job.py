@@ -351,6 +351,8 @@ def generate_graph_types(
                 alpha=alpha,
                 beta=beta,
                 call_metadata={"stage_name": "graph_types_generation"},
+                df=df,
+                use_tools=stage_uses_tools(stages, "graph_types_generation"),
             )
 
             for graph_type in graph_types:
