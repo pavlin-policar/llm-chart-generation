@@ -24,7 +24,7 @@
         "alpha": 2,
         "beta": 4,
         "reasoning": true,
-        "tools": false,
+        "tools": true,
         "num_graphs": 10,
         "_comment": "Pass 'variable_per_dataset' for the LLM to choose number of graph types depending on the dataset."
       }
