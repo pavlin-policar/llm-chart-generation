@@ -33,6 +33,7 @@ MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
 ERROR_PATH = None
 CURRENT_STAGE = None
+CURRENT_GRAPH_ID = None
 
 
 LLM_CALL_COLLECTOR = LLMCallCollector()
@@ -48,6 +49,7 @@ def log_error(stage, error):
             file.write(
                 json.dumps(
                     {
+                        "graph_id": CURRENT_GRAPH_ID,
                         "stage": stage,
                         "error": f"{type(error).__name__}: {error}",
                     },
@@ -673,9 +675,10 @@ def build_metadata(
     images,
     image_id,
     llm_calls,
+    graph_id=None,
 ):
     return {
-        "id": str(uuid.uuid4()),
+        "id": graph_id or str(uuid.uuid4()),
         "prefix_id": image_id,
         "accepted": images[-1]["accept"],
         "dataset": {
@@ -715,8 +718,11 @@ def generate_graph(
     llm_think,
     rating_threshold,
     initial_llm_calls,
+    graph_id=None,
 ):
-    global CURRENT_STAGE
+    global CURRENT_STAGE, CURRENT_GRAPH_ID
+
+    CURRENT_GRAPH_ID = graph_id or str(uuid.uuid4())
 
     LLM_CALL_COLLECTOR.start(initial_llm_calls)
     time_start = time.perf_counter()
@@ -921,6 +927,7 @@ def generate_graph(
         images,
         image_id,
         llm_calls,
+        graph_id=CURRENT_GRAPH_ID,
     )
 
 
@@ -930,7 +937,9 @@ def append_metadata(metadata_path, metadata):
 
 
 def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
-    global ERROR_PATH
+    global ERROR_PATH, CURRENT_GRAPH_ID
+
+    CURRENT_GRAPH_ID = None
 
     main_dir = Path(__file__).resolve().parent.parent.parent
     dataset_folder = os.path.join(main_dir, "dataset")
@@ -1009,6 +1018,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
             if image_index >= target_index:
                 break
 
+            graph_id = str(uuid.uuid4())
             for retry in range(1, MAX_GRAPH_RETRIES + 1):
                 try:
                     metadata = generate_graph(
@@ -1028,6 +1038,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                         llm_think,
                         args.rating_threshold,
                         initial_llm_calls,
+                        graph_id=graph_id,
                     )
                     append_metadata(metadata_path, metadata)
                     image_index += 1
@@ -1036,6 +1047,8 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                 except Exception as error:
                     log_error(CURRENT_STAGE or "graph_generation", error)
                     print(f"Error generating graph, retrying ({retry}/{MAX_GRAPH_RETRIES})... {error}")
+
+            CURRENT_GRAPH_ID = None
 
 
 def main():
