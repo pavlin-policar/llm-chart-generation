@@ -373,7 +373,7 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metad
         use_tools,
         call_metadata,
     )
-    return json.dumps(response.model_dump(), ensure_ascii=False)
+    return response.model_dump()
 
 CODE_TOOL_INSTRUCTIONS = (
     "TOOL USAGE REQUIREMENTS:\n"
@@ -413,6 +413,8 @@ def graph_call(
         "selected_plot has exactly these keys:\n"
         '  - "type": the required plot type to render\n'
         '  - "features": the exact list of column names that must be used for the plot\n'
+        '  - "description": short description of the plot\n'
+        '  - "style": matplotlib style of the plot\n\n'
         "Your job:\n"
         '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         "- Follow `plan` for x/y/hue/facet/aggregation/binning/filters/figsize/title.\n"
@@ -503,7 +505,8 @@ def recode_call(
         "selected_plot has exactly these keys:\n"
         '  - "type": the required plot type to render\n'
         '  - "features": the exact list of column names that must be used for the plot\n'
-        '  - "style": the matplotlib style to use for rendering\n\n'
+        '  - "description": short description of the plot\n'
+        '  - "style": matplotlib style of the plot\n\n'
         "Your job:\n"
         '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         f"- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path'\n"
@@ -636,12 +639,6 @@ def graph_error_call(
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Return the COMPLETE corrected code, not a patch or explanation.\n\n"
-        "Inputs you must rely on:\n"
-        f"selected_plot = {json.dumps(selected_plot, ensure_ascii=False)}\n\n"
-        f"FEATURES_METADATA:\n{json.dumps(features, ensure_ascii=False)}\n\n"
-        f"HEAD:\n{json.dumps(head, ensure_ascii=False)}\n\n"
-        "PREVIOUS CODE:\n"f"{previous_code}\n\n"
-        "EXECUTION ERROR:\n"f"{execution_error}\n"
     )
 
     if use_tools:
@@ -789,8 +786,8 @@ def graph_evaluation_call(
         "- scaling_layout\n"
         "- missing_elements\n"
         "- rendering_error\n"
-        "- spec_mismatch\n",
-        "- data_fidelity\n",
+        "- spec_mismatch\n"
+        "- data_fidelity\n"
         "- other\n"
         "\n"
         "Severity levels:\n"

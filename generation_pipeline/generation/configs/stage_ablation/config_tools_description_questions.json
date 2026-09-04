@@ -60,13 +60,13 @@
     "description": {
       "parameters": {
         "reasoning": true,
-        "tools": false
+        "tools": true
       }
     },
     "questions": {
       "parameters": {
         "reasoning": true,
-        "tools": false,
+        "tools": true,
         "num_questions": 20,
         "one": false
       }
