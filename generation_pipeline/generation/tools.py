@@ -241,7 +241,7 @@ def create_code_execution_tool(df, selected_plot):
     return execute_plot_code
 
 
-def invoke_with_tools(llm, messages, df, config=None, selected_plot=None):
+def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return_history=False):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
     tools = create_dataframe_tools(df)
@@ -256,7 +256,7 @@ def invoke_with_tools(llm, messages, df, config=None, selected_plot=None):
         history.append(response)
 
         if not response.tool_calls:
-            return response
+            return (response, history) if return_history else response
 
         for tool_call in response.tool_calls:
             dataframe_tool = tools_by_name.get(tool_call["name"])
@@ -276,4 +276,6 @@ def invoke_with_tools(llm, messages, df, config=None, selected_plot=None):
             )
 
     history.append(HumanMessage(content="Tool-call limit reached. Return the requested final answer now."))
+    if return_history:
+        return None, history
     return tool_llm.invoke(history, config=config)

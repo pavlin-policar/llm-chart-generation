@@ -355,6 +355,7 @@ def generate_graph_types(
                 call_metadata={"stage_name": "graph_types_generation"},
                 df=df,
                 use_tools=stage_uses_tools(stages, "graph_types_generation"),
+                final_llm=llm,
             )
 
             for graph_type in graph_types:
@@ -757,6 +758,7 @@ def generate_graph(
             df=df,
             use_tools=stage_uses_tools(stages, "plan_code_generation"),
             call_metadata={"stage_name": "plan_code_generation"},
+            final_llm=llm,
         )
 
     CURRENT_STAGE = "code_generation"
@@ -873,6 +875,7 @@ def generate_graph(
             selected_plot["description"],
             use_tools=stage_uses_tools(stages, "description"),
             call_metadata={"stage_name": "description"},
+            final_llm=llm,
         )
 
         CURRENT_STAGE = "questions"
@@ -894,6 +897,7 @@ def generate_graph(
                     graph_df=graph_df,
                     use_tools=stage_uses_tools(stages, "questions"),
                     call_metadata={"stage_name": "questions"},
+                    final_llm=llm,
                 )
 
                 questions.append(quest)
@@ -909,6 +913,7 @@ def generate_graph(
                 graph_df=graph_df,
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},
+                final_llm=llm,
             )
 
         if stages["questions"].get("parameters", {}).get("grounding_judge", True):
@@ -919,6 +924,7 @@ def generate_graph(
                 dataset_sem["description"],
                 questions,
                 call_metadata={"stage_name": "question_judge"},
+                final_llm=llm,
             )
             for question, valid in zip(questions, judgments):
                 question["valid"] = valid

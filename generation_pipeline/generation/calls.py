@@ -4,7 +4,7 @@ from typing import Literal
 
 import numpy as np
 from helpers import after_think, strip_code_fences
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 from tools import invoke_with_tools
 
@@ -137,6 +137,15 @@ def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None, sele
     return llm.invoke(messages, config=config)
 
 
+def _include_reasoning_in_history(message):
+    if not isinstance(message, AIMessage) or not isinstance(message.content, str):
+        return message
+    reasoning = message.additional_kwargs.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning or "<think>" in message.content:
+        return message
+    return message.model_copy(update={"content": f"<think>{reasoning}</think>\n{message.content}"})
+
+
 def invoke_structured_llm(
     llm,
     messages,
@@ -145,8 +154,34 @@ def invoke_structured_llm(
     use_tools=False,
     call_metadata=None,
     enforce_schema_at_api=True,
+    final_llm=None,
 ):
     config = {"metadata": call_metadata} if call_metadata else None
+
+    if final_llm is not None:
+        if llm is final_llm and not (use_tools and df is not None):
+            return final_llm.with_structured_output(
+                schema,
+                method="json_schema",
+            ).invoke(messages, config=config)
+
+        if use_tools and df is not None:
+            _, history = invoke_with_tools(
+                llm,
+                messages,
+                df,
+                config=config,
+                return_history=True,
+            )
+        else:
+            history = list(messages) if isinstance(messages, list) else [HumanMessage(content=messages)]
+            history.append(llm.invoke(history, config=config))
+
+        history = [_include_reasoning_in_history(message) for message in history]
+        return final_llm.with_structured_output(
+            schema,
+            method="json_schema",
+        ).invoke(history, config=config)
 
     if enforce_schema_at_api and not (use_tools and df is not None):
         return llm.with_structured_output(
@@ -230,7 +265,7 @@ def format_dataset_description_call(llm, metadata, call_metadata=None) -> dict:
 
 def graphs_call(
     llm, features: dict, dataset_description: str, num_graphs: int, creativity: float, alpha: float, beta: float, call_metadata=None,
-    df=None, use_tools=False,
+    df=None, use_tools=False, final_llm=None,
 ) -> list[dict]:  # Reasoning
     """
     Calls LLM -> returns 10 specifications for 10 graphs that could be made from this dataset.
@@ -302,6 +337,7 @@ def graphs_call(
         use_tools=use_tools,
         call_metadata=call_metadata,
         enforce_schema_at_api=False,
+        final_llm=final_llm,
     )
     return [spec.model_dump() for spec in response.root]
 
@@ -375,7 +411,7 @@ def compute_info_call(llm, features, selected_plot, head, call_metadata=None):  
 
     return out
 
-def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metadata=None) -> str:
+def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metadata=None, final_llm=None) -> str:
     plan_prompt = (
         "You are a plotting planner.\n"
         "You will be given:\n"
@@ -401,6 +437,7 @@ def plan_call(llm, features, selected_plot, df=None, use_tools=False, call_metad
         df,
         use_tools,
         call_metadata,
+        final_llm=final_llm,
     )
     return response.model_dump()
 
@@ -879,6 +916,7 @@ def describe_graph_png(
     plot_description,
     use_tools=False,
     call_metadata=None,
+    final_llm=None,
 ) -> str:  # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
@@ -982,6 +1020,7 @@ def describe_graph_png(
         use_tools,
         call_metadata,
         enforce_schema_at_api=False,
+        final_llm=final_llm,
     )
     return response.description
 
@@ -996,6 +1035,7 @@ def generate_graph_questions(
     graph_df=None,
     use_tools=False,
     call_metadata=None,
+    final_llm=None,
 ) -> list[dict]:  # Reasoning
     """
     Calls LLM -> given the image, dataset desctiption, metadata and full graph description,
@@ -1081,6 +1121,7 @@ def generate_graph_questions(
         use_tools,
         call_metadata,
         enforce_schema_at_api=False,
+        final_llm=final_llm,
     )
     if len(response.questions) != num:
         raise ValueError(f"Expected {num} questions, received {len(response.questions)}")
@@ -1097,6 +1138,7 @@ def generate_graph_question_one(
     graph_df=None,
     use_tools=False,
     call_metadata=None,
+    final_llm=None,
 ) -> dict:
     """Generate one chart question using all previous questions as context."""
 
@@ -1172,11 +1214,12 @@ def generate_graph_question_one(
         use_tools,
         call_metadata,
         enforce_schema_at_api=False,
+        final_llm=final_llm,
     )
     return response.model_dump()
 
 
-def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None):
+def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None):
     """Check question-answer grounding using only the visible chart and domain context."""
     prompt = (
         "Judge each QUESTION and its proposed ANSWER in order. Use ONLY the chart image "
@@ -1205,6 +1248,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         QuestionValidityResults,
         call_metadata=call_metadata,
         enforce_schema_at_api=False,
+        final_llm=final_llm,
     )
     if len(response.judgments) != len(questions):
         raise ValueError("Question grounding judgment count does not match questions")
