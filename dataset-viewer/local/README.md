@@ -41,6 +41,8 @@ RESULTS_DIR=/path/to/results \
   iteration and error rates loaded from `error.jsonl` (also supports
   `errors.jsonl`, `error.json`, and `errors.json`). Execution errors use
   chart count; regeneration errors use iteration outputs minus chart count.
+- Structured per-error feedback frequency and mean/standard deviation of
+  severity by error type, counting occurrences across all chart iterations.
 - Filters for canonical chart type, dataset, acceptance, text search, and plot quality.
 - A dedicated **Dataset statistics** page, opened from the sidebar, compares
   all generation folders as table rows and includes average iteration outputs

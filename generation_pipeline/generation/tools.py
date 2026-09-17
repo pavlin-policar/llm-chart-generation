@@ -241,17 +241,14 @@ def create_code_execution_tool(df, selected_plot):
     return execute_plot_code
 
 
-def invoke_with_tools(llm, messages, df, response_format=None, config=None, selected_plot=None):
+def invoke_with_tools(llm, messages, df, config=None, selected_plot=None):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
     tools = create_dataframe_tools(df)
     if selected_plot is not None:
         tools.append(create_code_execution_tool(df, selected_plot))
     tools_by_name = {dataframe_tool.name: dataframe_tool for dataframe_tool in tools}
-    bind_kwargs = {}
-    if response_format is not None:
-        bind_kwargs = {"response_format": response_format, "strict": True}
-    tool_llm = llm.bind_tools(tools, **bind_kwargs)
+    tool_llm = llm.bind_tools(tools)
     history = list(messages) if isinstance(messages, list) else [HumanMessage(content=messages)]
 
     for _ in range(MAX_TOOL_CALLS):

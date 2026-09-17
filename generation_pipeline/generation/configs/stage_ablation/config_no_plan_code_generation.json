@@ -68,7 +68,8 @@
         "reasoning": true,
         "tools": false,
         "num_questions": 20,
-        "one": false
+        "one": false,
+        "grounding_judge": true
       }
     },
     "question_labeling": {}

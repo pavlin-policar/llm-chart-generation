@@ -106,6 +106,14 @@ class GraphQuestions(StrictModel):
     questions: list[GraphQuestion]
 
 
+class QuestionValidity(StrictModel):
+    valid: bool
+
+
+class QuestionValidityResults(StrictModel):
+    judgments: list[QuestionValidity]
+
+
 class QuestionTypes(
     RootModel[
         list[
@@ -129,25 +137,40 @@ def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None, sele
     return llm.invoke(messages, config=config)
 
 
-def invoke_structured_llm(llm, messages, schema, df=None, use_tools=False, call_metadata=None):
+def invoke_structured_llm(
+    llm,
+    messages,
+    schema,
+    df=None,
+    use_tools=False,
+    call_metadata=None,
+    enforce_schema_at_api=True,
+):
     config = {"metadata": call_metadata} if call_metadata else None
+
+    if enforce_schema_at_api and not (use_tools and df is not None):
+        return llm.with_structured_output(
+            schema,
+            method="json_schema",
+        ).invoke(messages, config=config)
+
     if use_tools and df is not None:
         response = invoke_with_tools(
             llm,
             messages,
             df,
-            response_format=schema,
             config=config,
         )
-        parsed = response.additional_kwargs.get("parsed")
-        if parsed is None:
-            raise ValueError("Structured response was not returned")
-        return schema.model_validate(parsed)
+    else:
+        response = llm.invoke(messages, config=config)
 
-    return llm.with_structured_output(
-        schema,
-        method="json_schema",
-    ).invoke(messages, config=config)
+    if not isinstance(response.content, str):
+        raise ValueError("Locally validated structured response must be JSON text")
+
+    _, content = after_think(response.content)
+    content = strip_code_fences(content)
+    parsed = json.loads(content)
+    return schema.model_validate(parsed)
 
 
 def determine_dataset_usability_call(llm, metadata, call_metadata=None) -> dict:
@@ -272,7 +295,13 @@ def graphs_call(
         )
 
     response = invoke_structured_llm(
-        llm, prompt, GraphSpecs, df=df, use_tools=use_tools, call_metadata=call_metadata,
+        llm,
+        prompt,
+        GraphSpecs,
+        df=df,
+        use_tools=use_tools,
+        call_metadata=call_metadata,
+        enforce_schema_at_api=False,
     )
     return [spec.model_dump() for spec in response.root]
 
@@ -669,7 +698,9 @@ def graph_evaluation_call(
     image_path: str,
     plot_code: str,
     call_metadata=None,
-    feedback_type: Literal["rating", "per_error"] = "rating",
+    feedback_type: Literal[
+        "rating", "per_error", "per_error_exhaustive"
+    ] = "rating",
 ) -> dict:
     """
     Evaluates whether a graph is good enough for the final dataset.
@@ -814,7 +845,7 @@ def graph_evaluation_call(
     if feedback_type == "rating":
         evaluation_prompt = fixed_evaluation_prompt + rating_evaluation_prompt
         evaluation_schema = GraphEvaluation
-    elif feedback_type == "per_error":
+    elif feedback_type in ("per_error", "per_error_exhaustive"):
         evaluation_prompt = fixed_evaluation_prompt + per_error_evaluation_prompt
         evaluation_schema = PerErrorGraphEvaluation
     else:
@@ -950,6 +981,7 @@ def describe_graph_png(
         graph_df,
         use_tools,
         call_metadata,
+        enforce_schema_at_api=False,
     )
     return response.description
 
@@ -1000,7 +1032,7 @@ def generate_graph_questions(
         "- Do NOT produce questions that are just instructions like 'analyze' or 'explain how'.\n"
         "- Avoid vague questions. Each must have a single, checkable answer.\n"
         "- If exact numeric values are not available, ask questions that accept approximate answers only when the chart clearly supports approximation.\n"
-        "- While you can help yourself with the description to answer a question more accurately, do NOT ask questions about something that can't be answered ONLY from the image."
+        "- Every answer must be grounded in the image; use the descriptions for variable meanings, not unseen values."
         "\n"
         "Output format (STRICT):\n"
         "Return the questions in the `questions` response field.\n"
@@ -1015,6 +1047,13 @@ def generate_graph_questions(
         "- Questions should cover BOTH:\n"
         "  (a) chart mechanics/visual properties (axes, legend, encodings, layout), and\n"
         "  (b) semantics in dataset context (what variables represent, what patterns mean).\n"
+        f"- At least {max(1, num // 4)} questions MUST be domain-focused: phrase them using the real-world entities and measurements in this dataset, not generic axes, series, or chart terms.\n"
+        "- Each domain-focused question must connect a visible comparison or pattern to a specific variable meaning stated in the DATASET DESCRIPTION; its answer must need both sources, so set answer_basis to 'both'.\n"
+        f"- At least {max(1, num // 10)} of those domain-focused questions MUST make a checkable inference about the real-world subject from the plotted pattern, rather than just read a value.\n"
+        "- Example only for handwriting data: 'Given that point_1_y is the stroke's starting height, which digit class tends to begin highest?' not 'Which series has the highest y-values?' Use this dataset's actual terms instead.\n"
+        "- Inference example: if digit classes overlap at high starting points, ask 'Can a high starting point alone identify the digit?' (no, if they visibly overlap). Ask which digit is most likely only if one class clearly dominates that region; do not imply certainty from overlap.\n"
+        "- If replacing the domain terms with 'group A' and 'variable Y' leaves a question essentially unchanged, make it more specific to the dataset.\n"
+        "- Avoid generic questions about statistical or plotting methods (e.g., what PCA does). Use only domain facts supplied in the descriptions; do not invent domain explanations.\n"
         "- Do not repeat the same question pattern; vary them.\n"
         "- Questions should be related to the graph and the data in the graph, do NOT ask general questions about the dataset that do not directly relate to the chart.\n"
         "- Do NOT ask questions like how many rows are in the data or how many rows were left out, unless that is specified on the image itself.\n"
@@ -1041,6 +1080,7 @@ def generate_graph_questions(
         graph_df,
         use_tools,
         call_metadata,
+        enforce_schema_at_api=False,
     )
     if len(response.questions) != num:
         raise ValueError(f"Expected {num} questions, received {len(response.questions)}")
@@ -1079,11 +1119,27 @@ def generate_graph_question_one(
         "- Questions should cover BOTH:\n"
         "  (a) chart mechanics/visual properties (axes, legend, encodings, layout), and\n"
         "  (b) semantics in dataset context (what variables represent, what patterns mean).\n"
+        "- Phrase domain questions using real-world entities and measurements, not generic axes or series. Connect a visible pattern to a variable meaning stated in the DATASET DESCRIPTION.\n"
+        "- Example only for handwriting data: 'Given that point_1_y is the stroke's starting height, which digit class tends to begin highest?' not 'Which series has the highest y-values?' Use this dataset's actual terms instead.\n"
+        "- For inference questions, ask what the visible pattern supports about the real-world subject; an answer that the chart cannot distinguish groups is valid when overlap is clear. Do not guess a class from an ambiguous individual point.\n"
+        "- Avoid generic questions about statistical or plotting methods (e.g., what PCA does). Use only domain facts supplied in the descriptions; do not invent domain explanations.\n"
         "- Do not repeat the same question pattern; vary them.\n"
         "- Questions should be related to the graph and the data in the graph, do NOT ask general questions about the dataset that do not directly relate to the chart.\n"
         "- Do NOT ask questions like how many rows are in the data or how many rows were left out, unless that is specified on the image itself.\n"
         "- Do NOT include any extra text outside the JSON.\n"
     )
+    if len(previous_questions) % 4 == 0:
+        prompt += (
+            "This question MUST be domain-focused: use both a visible pattern and "
+            "the dataset-specific meaning of a plotted variable. Set answer_basis "
+            "to 'both'. If the supplied context does not support this, ask a "
+            "grounded image-only question instead of inventing facts.\n"
+        )
+    if len(previous_questions) % 8 == 4:
+        prompt += (
+            "This question MUST ask for a checkable domain inference from the "
+            "visible pattern, not merely the name or value of a plotted item.\n"
+        )
 
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
@@ -1115,8 +1171,44 @@ def generate_graph_question_one(
         graph_df,
         use_tools,
         call_metadata,
+        enforce_schema_at_api=False,
     )
     return response.model_dump()
+
+
+def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None):
+    """Check question-answer grounding using only the visible chart and domain context."""
+    prompt = (
+        "Judge each QUESTION and its proposed ANSWER in order. Use ONLY the chart image "
+        "and DATASET DESCRIPTION; no plotting code, hidden data, or outside knowledge.\n"
+        "Set valid to true only if the proposed answer is correct and checkable "
+        "from visible chart evidence alone or together with domain facts explicitly "
+        "stated in the dataset description. Simple arithmetic on visible values is allowed.\n"
+        "Set valid to false if the answer needs unseen values, unstated domain facts, "
+        "or general statistical/visualization theory (e.g., what PCA does), or if "
+        "the question does not require visible chart evidence.\n"
+        'Return ONLY JSON: {"judgments": [{"valid": true}, {"valid": false}, ...]}.'
+    )
+    with open(png_path, "rb") as file:
+        png_b64 = base64.b64encode(file.read()).decode("utf-8")
+
+    pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
+    message = HumanMessage(content=[
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
+        {"type": "text", "text": f"QUESTIONS:\n{json.dumps(pairs, ensure_ascii=False)}"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+    ])
+    response = invoke_structured_llm(
+        llm,
+        [message],
+        QuestionValidityResults,
+        call_metadata=call_metadata,
+        enforce_schema_at_api=False,
+    )
+    if len(response.judgments) != len(questions):
+        raise ValueError("Question grounding judgment count does not match questions")
+    return [judgment.valid for judgment in response.judgments]
 
 
 def give_question_types(llm, questions, call_metadata=None):  # No reasoning

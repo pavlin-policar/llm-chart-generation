@@ -13,7 +13,8 @@ def join_files(current_directory, prefix):
         return
 
     pattern = os.path.join(current_directory, f"{prefix}*.jsonl")
-    regex = re.compile(rf"^{prefix}\d+(?:_\d+)*\.jsonl$")
+    source_prefix = r"error(?:_metadata)?" if prefix == "error" else re.escape(prefix)
+    regex = re.compile(rf"^{source_prefix}\d+(?:_\d+)*\.jsonl$")
 
     matching_files = []
     for filepath in glob.glob(pattern):

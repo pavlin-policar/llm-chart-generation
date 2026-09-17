@@ -221,6 +221,38 @@ def read_error_counts(source_dir: Path) -> dict[str, int]:
     return dict(counts)
 
 
+def summarize_feedback_errors(records: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+    """Count structured feedback errors across iterations and affected charts."""
+    totals = defaultdict(lambda: {
+        "count": 0, "severity_count": 0, "severity_sum": 0,
+        "severity_squared_sum": 0,
+    })
+    charts_by_type = defaultdict(set)
+    evaluated_iterations = 0
+    for chart_index, record in enumerate(records):
+        for image in record.get("images") or []:
+            if not isinstance(image, dict) or not isinstance(image.get("errors"), list):
+                continue
+            evaluated_iterations += 1
+            for error in image["errors"]:
+                if not isinstance(error, dict) or not isinstance(error.get("type"), str):
+                    continue
+                error_type = error["type"].strip()
+                if not error_type or error_type == "none":
+                    continue
+                totals[error_type]["count"] += 1
+                charts_by_type[error_type].add(chart_index)
+                severity = error.get("severity")
+                if isinstance(severity, (int, float)) and not isinstance(severity, bool) and 1 <= severity <= 5:
+                    totals[error_type]["severity_count"] += 1
+                    totals[error_type]["severity_sum"] += severity
+                    totals[error_type]["severity_squared_sum"] += severity ** 2
+    return evaluated_iterations, {
+        error_type: {**values, "chart_count": len(charts_by_type[error_type])}
+        for error_type, values in totals.items()
+    }
+
+
 def build_generation_metrics(
     generation_name: str,
     records: list[dict[str, Any]],
@@ -272,6 +304,7 @@ def build_generation_metrics(
     error_counts = read_error_counts(source_dir)
     execution_errors = int(error_counts.get("code_execution", 0))
     regeneration_errors = int(error_counts.get("code_regeneration", 0))
+    feedback_evaluations, feedback_error_types = summarize_feedback_errors(records)
     return {
         "name": generation_name,
         "chart_count": chart_count,
@@ -285,6 +318,8 @@ def build_generation_metrics(
             else None
         ),
         "acceptance_by_iteration": acceptance_by_iteration,
+        "feedback_evaluations": feedback_evaluations,
+        "feedback_error_types": feedback_error_types,
         "error_rates": {
             "code_execution": {
                 "count": execution_errors,
@@ -705,7 +740,7 @@ def build(args: argparse.Namespace) -> None:
 
     type_counts = Counter(row["canonical_type"] for row in chart_index)
     manifest = {
-        "schema_version": 5,
+        "schema_version": 6,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_url": args.base_url,
         "chart_index": "charts.jsonl.gz",

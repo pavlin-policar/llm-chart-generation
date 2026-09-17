@@ -130,6 +130,34 @@ def _metric_rate_label(metric: dict | None) -> str:
     return f"{float(rate):.1%} ({count:,}/{denominator:,})"
 
 
+def feedback_error_rows(metrics: list[dict]) -> list[dict]:
+    """Pool error frequencies and population severity variation across folders."""
+    totals = defaultdict(lambda: {
+        "count": 0, "chart_count": 0, "severity_count": 0,
+        "severity_sum": 0, "severity_squared_sum": 0,
+    })
+    for metric in metrics:
+        for error_type, values in (metric.get("feedback_error_types") or {}).items():
+            for key in totals[error_type]:
+                totals[error_type][key] += values.get(key, 0)
+
+    total_errors = sum(values["count"] for values in totals.values())
+    rows = []
+    for error_type, values in totals.items():
+        n = values["severity_count"]
+        mean = values["severity_sum"] / n if n else None
+        sd = (max(0, values["severity_squared_sum"] / n - mean ** 2) ** 0.5) if n else None
+        rows.append({
+            "Error type": error_type,
+            "Occurrences": values["count"],
+            "Share of errors": f"{values['count'] / total_errors:.1%}",
+            "Charts affected": values["chart_count"],
+            "Mean severity": round(mean, 2) if mean is not None else None,
+            "Severity SD": round(sd, 2) if sd is not None else None,
+        })
+    return sorted(rows, key=lambda row: (-row["Occurrences"], row["Error type"]))
+
+
 def render_generation_metrics(
     manifest: dict,
     selected_generation: str,
@@ -214,6 +242,20 @@ def render_generation_metrics(
             "Code regeneration uses iteration outputs minus generated charts."
         )
         st.dataframe(error_rows, use_container_width=True, hide_index=True)
+
+        st.markdown("**Feedback errors by type**")
+        feedback_rows = feedback_error_rows(metrics)
+        evaluated = sum(metric.get("feedback_evaluations", 0) for metric in metrics)
+        st.caption(
+            f"Based on {evaluated:,} structured per-error feedback iterations. "
+            "Occurrences count every reported error across iterations; charts affected "
+            "counts each chart once per type. Severity SD is population standard deviation. "
+            "Rating-only feedback has no per-error severity and is excluded."
+        )
+        if feedback_rows:
+            st.dataframe(feedback_rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No structured feedback errors available.")
 
 
 def render_page_navigation() -> str:

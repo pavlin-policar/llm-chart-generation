@@ -22,6 +22,7 @@ from calls import (
     graph_error_call,
     graph_evaluation_call,
     graphs_call,
+    judge_graph_questions,
     plan_call,
     recode_call,
     replace_vars_call,
@@ -317,7 +318,6 @@ def generate_graph_types(
     llm_think,
 ):
     print(f"Generating graph types for dataset {dataset_id}...")
-    head_json = df.head(5).to_dict(orient="records")
 
     for retry in range(1, MAX_GRAPH_TYPE_RETRIES + 1):
         try:
@@ -346,7 +346,7 @@ def generate_graph_types(
 
             graph_types = graphs_call(
                 graph_types_llm,
-                json.dumps(head_json),
+                dataset_sem["features"],
                 dataset_sem["description"],
                 num_graphs,
                 creativity=creativity,
@@ -420,7 +420,7 @@ def review_and_regenerate(
     images = []
     feedback_llm = select_llm(stages, "feedback", llm, llm_think)
     feedback_type = stage_parameter(stages, "feedback", "feedback_type")
-    if feedback_type not in ("rating", "per_error"):
+    if feedback_type not in ("rating", "per_error", "per_error_exhaustive"):
         raise ValueError(f"Unsupported feedback_type: {feedback_type}")
     regeneration_active = stage_is_active(stages, "code_regeneration")
 
@@ -479,11 +479,16 @@ def review_and_regenerate(
                     "error_type": error_types,
                     "code": code,
                 }
-                if feedback_type == "per_error":
+                if feedback_type in ("per_error", "per_error_exhaustive"):
                     image["errors"] = errors
                 images.append(image)
 
-                if accepted or iteration >= max_iterations:
+                feedback_resolved = (
+                    not errors
+                    if feedback_type == "per_error_exhaustive"
+                    else accepted
+                )
+                if feedback_resolved or iteration >= max_iterations:
                     break
 
             except Exception as error:
@@ -905,6 +910,18 @@ def generate_graph(
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},
             )
+
+        if stages["questions"].get("parameters", {}).get("grounding_judge", True):
+            CURRENT_STAGE = "question_judge"
+            judgments = judge_graph_questions(
+                questions_llm,
+                final_img_path,
+                dataset_sem["description"],
+                questions,
+                call_metadata={"stage_name": "question_judge"},
+            )
+            for question, valid in zip(questions, judgments):
+                question["valid"] = valid
 
         CURRENT_STAGE = "question_labeling"
         label_questions(questions, stages, llm, llm_think)

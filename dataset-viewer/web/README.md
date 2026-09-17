@@ -11,11 +11,11 @@ directly above its code. Each chart detail also joins typed `llm_calls` messages
 marks included images, displays provider reasoning traces, and retains access to
 the exact payload stored in its source `metadata.jsonl` record.
 
-The dataset metrics panel compares cumulative acceptance at each iteration and
-generation errors for every generation-dataset folder. They are displayed on a
-dedicated page opened from the sidebar and include iteration outputs per
-accepted chart. The values are stored in manifest schema version 5; regenerate
-the static bundle after changing metadata or error logs.
+The dataset metrics panel compares cumulative acceptance, generation errors,
+and structured feedback-error frequency and severity by type. It is displayed
+on a dedicated page opened from the sidebar. The values are stored in manifest
+schema version 6; regenerate the static bundle after changing metadata or
+error logs.
 
 The public deployment is available at
 <https://llm-chart-generation.streamlit.app>.

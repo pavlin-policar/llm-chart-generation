@@ -279,6 +279,38 @@ def ordered_iterations(images: list[dict]) -> list[dict]:
     return sorted(items, key=key)
 
 
+def summarize_feedback_errors(records: list[dict]) -> tuple[int, dict]:
+    """Count structured feedback errors across iterations and affected charts."""
+    totals = defaultdict(lambda: {
+        "count": 0, "severity_count": 0, "severity_sum": 0,
+        "severity_squared_sum": 0,
+    })
+    charts_by_type = defaultdict(set)
+    evaluated_iterations = 0
+    for chart_index, record in enumerate(records):
+        for image in record.get("images") or []:
+            if not isinstance(image, dict) or not isinstance(image.get("errors"), list):
+                continue
+            evaluated_iterations += 1
+            for error in image["errors"]:
+                if not isinstance(error, dict) or not isinstance(error.get("type"), str):
+                    continue
+                error_type = error["type"].strip()
+                if not error_type or error_type == "none":
+                    continue
+                totals[error_type]["count"] += 1
+                charts_by_type[error_type].add(chart_index)
+                severity = error.get("severity")
+                if isinstance(severity, (int, float)) and not isinstance(severity, bool) and 1 <= severity <= 5:
+                    totals[error_type]["severity_count"] += 1
+                    totals[error_type]["severity_sum"] += severity
+                    totals[error_type]["severity_squared_sum"] += severity ** 2
+    return evaluated_iterations, {
+        error_type: {**values, "chart_count": len(charts_by_type[error_type])}
+        for error_type, values in totals.items()
+    }
+
+
 def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
     """Compute cumulative acceptance and generation error rates for one folder."""
     chart_count = len(records)
@@ -327,6 +359,7 @@ def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
     error_counts = load_error_counts(dataset_name)
     execution_errors = int(error_counts.get("code_execution", 0))
     regeneration_errors = int(error_counts.get("code_regeneration", 0))
+    feedback_evaluations, feedback_error_types = summarize_feedback_errors(records)
     return {
         "name": dataset_name,
         "chart_count": chart_count,
@@ -340,6 +373,8 @@ def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
             else None
         ),
         "acceptance_by_iteration": acceptance_by_iteration,
+        "feedback_evaluations": feedback_evaluations,
+        "feedback_error_types": feedback_error_types,
         "error_rates": {
             "code_execution": {
                 "count": execution_errors,
@@ -368,6 +403,34 @@ def _metric_rate_label(metric: dict | None) -> str:
     if not denominator or rate is None:
         return f"N/A ({count:,}/{denominator:,})"
     return f"{float(rate):.1%} ({count:,}/{denominator:,})"
+
+
+def feedback_error_rows(metrics: list[dict]) -> list[dict]:
+    """Pool error frequencies and population severity variation across folders."""
+    totals = defaultdict(lambda: {
+        "count": 0, "chart_count": 0, "severity_count": 0,
+        "severity_sum": 0, "severity_squared_sum": 0,
+    })
+    for metric in metrics:
+        for error_type, values in (metric.get("feedback_error_types") or {}).items():
+            for key in totals[error_type]:
+                totals[error_type][key] += values.get(key, 0)
+
+    total_errors = sum(values["count"] for values in totals.values())
+    rows = []
+    for error_type, values in totals.items():
+        n = values["severity_count"]
+        mean = values["severity_sum"] / n if n else None
+        sd = (max(0, values["severity_squared_sum"] / n - mean ** 2) ** 0.5) if n else None
+        rows.append({
+            "Error type": error_type,
+            "Occurrences": values["count"],
+            "Share of errors": f"{values['count'] / total_errors:.1%}",
+            "Charts affected": values["chart_count"],
+            "Mean severity": round(mean, 2) if mean is not None else None,
+            "Severity SD": round(sd, 2) if sd is not None else None,
+        })
+    return sorted(rows, key=lambda row: (-row["Occurrences"], row["Error type"]))
 
 
 def render_generation_metrics(metrics: list[dict], standalone: bool = False) -> None:
@@ -436,6 +499,20 @@ def render_generation_metrics(metrics: list[dict], standalone: bool = False) -> 
             "Code regeneration uses iteration outputs minus generated charts."
         )
         st.dataframe(error_rows, use_container_width=True, hide_index=True)
+
+        st.markdown("**Feedback errors by type**")
+        feedback_rows = feedback_error_rows(metrics)
+        evaluated = sum(metric.get("feedback_evaluations", 0) for metric in metrics)
+        st.caption(
+            f"Based on {evaluated:,} structured per-error feedback iterations. "
+            "Occurrences count every reported error across iterations; charts affected "
+            "counts each chart once per type. Severity SD is population standard deviation. "
+            "Rating-only feedback has no per-error severity and is excluded."
+        )
+        if feedback_rows:
+            st.dataframe(feedback_rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No structured feedback errors available.")
 
 
 # ---------------------------------------------------------------------------
