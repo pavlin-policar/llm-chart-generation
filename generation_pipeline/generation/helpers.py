@@ -42,7 +42,7 @@ def openml_list_uci(status="active"):
     - The OpenML Python client does not expose a true server-side offset the same
       way the REST endpoint does. We emulate offset/limit by slicing locally.
     """
-    ds_dict = openml.datasets.list_datasets(tag="uci", status=status)
+    ds_dict = openml.datasets.list_datasets(status=status)
 
     # Deterministic ordering for paging
     all_ids = sorted(ds_dict.keys())

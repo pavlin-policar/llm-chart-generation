@@ -14,14 +14,14 @@ from calls import (
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from langchain_openai import ChatOpenAI
 
-API_URL = "http://ixb1:8000/v1"
+API_URL = "http://0.0.0.0:8888/v1"
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--datasets",
         type=int,
-        default=10,
+        default=3000,
         help="Number of datasets to select.",
     )
     return parser.parse_args()
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     datasets_good_file = os.path.join(main_dir, "generation_pipeline", "generation", "configs", "good_datasets.jsonl")
 
     llm_think = ChatOpenAI(
-        model="qwen3.5",
+        model="qwen3.8",
         openai_api_key="EMPTY",
         openai_api_base=API_URL,
         extra_body={
