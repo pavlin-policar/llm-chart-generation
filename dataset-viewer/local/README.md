@@ -43,6 +43,9 @@ RESULTS_DIR=/path/to/results \
   chart count; regeneration errors use iteration outputs minus chart count.
 - Structured per-error feedback frequency and mean/standard deviation of
   severity by error type, counting occurrences across all chart iterations.
+- Observed corrections by error type, including how many feedback episodes
+  cleared after each number of revisions. A recurrence starts a new episode;
+  episodes without later structured feedback remain unconfirmed.
 - Filters for canonical chart type, dataset, acceptance, text search, and plot quality.
 - A dedicated **Dataset statistics** page, opened from the sidebar, compares
   all generation folders as table rows and includes average iteration outputs
@@ -51,8 +54,8 @@ RESULTS_DIR=/path/to/results \
 - Detail view with iteration images, visible per-iteration feedback directly
   above the iteration code, acceptance status, descriptions, structured
   data, joined and typed LLM messages, image placeholders, reasoning traces,
-  and access to the exact raw JSON from `metadata.jsonl`, plus questions and
-  per-model answers.
+  and access to the exact raw JSON from `metadata.jsonl`, plus questions,
+  their stored viability judgments, and per-model answers.
 - URL query parameters preserve filters, sorting, page, and selected chart.
 
 ## Caching

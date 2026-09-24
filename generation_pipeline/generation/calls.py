@@ -4,9 +4,13 @@ from typing import Literal
 
 import numpy as np
 from helpers import after_think, strip_code_fences
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 from tools import invoke_with_tools
+
+
+_UNPARSED = object()
+MAX_QUESTION_COUNT_ATTEMPTS = 3
 
 
 class StrictModel(BaseModel):
@@ -137,13 +141,64 @@ def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None, sele
     return llm.invoke(messages, config=config)
 
 
-def _include_reasoning_in_history(message):
-    if not isinstance(message, AIMessage) or not isinstance(message.content, str):
-        return message
-    reasoning = message.additional_kwargs.get("reasoning_content")
-    if not isinstance(reasoning, str) or not reasoning or "<think>" in message.content:
-        return message
-    return message.model_copy(update={"content": f"<think>{reasoning}</think>\n{message.content}"})
+def _final_response_text(response):
+    if not isinstance(response.content, str):
+        raise ValueError("Locally validated structured response must be JSON text")
+
+    try:
+        _, content = after_think(response.content)
+    except IndexError as error:
+        raise ValueError("Unclosed reasoning block in structured response") from error
+
+    return content.strip()
+
+
+def _parse_response_json(response):
+    return json.loads(strip_code_fences(_final_response_text(response)))
+
+
+def _preserves_existing_content(original, formatted):
+    """Allow schema wrapping and removal of extra fields, but no new values."""
+    if isinstance(original, list) and isinstance(formatted, dict) and len(formatted) == 1:
+        return _preserves_existing_content(original, next(iter(formatted.values())))
+    if isinstance(original, dict) and len(original) == 1 and isinstance(formatted, list):
+        return _preserves_existing_content(next(iter(original.values())), formatted)
+    if isinstance(original, dict) and isinstance(formatted, dict):
+        return all(
+            key in original and _preserves_existing_content(original[key], value)
+            for key, value in formatted.items()
+        )
+    if isinstance(original, list) and isinstance(formatted, list):
+        return len(original) == len(formatted) and all(
+            _preserves_existing_content(before, after)
+            for before, after in zip(original, formatted)
+        )
+    return type(original) is type(formatted) and original == formatted
+
+
+def _format_structured_response(response, schema, formatter_llm, call_metadata, original_json):
+    prompt = (
+        "Format the RESPONSE below as JSON matching the required schema. "
+        "This is a formatting task only. Preserve every existing question, answer, "
+        "fact, value, and list item exactly, including their order. "
+        "Omit only fields forbidden by the schema. Do not answer the original "
+        "task, paraphrase, recalculate, correct, add or remove list items, or "
+        "infer missing information.\n\n"
+        f"RESPONSE:\n{_final_response_text(response)}"
+    )
+    metadata = {**(call_metadata or {}), "format_retry": True}
+    formatted = formatter_llm.with_structured_output(
+        schema,
+        method="json_schema",
+    ).invoke([HumanMessage(content=prompt)], config={"metadata": metadata})
+    formatted = schema.model_validate(formatted)
+
+    if original_json is not _UNPARSED and not _preserves_existing_content(
+        original_json, formatted.model_dump(mode="json")
+    ):
+        raise ValueError("Formatting changed the structured response content")
+
+    return formatted
 
 
 def invoke_structured_llm(
@@ -156,56 +211,41 @@ def invoke_structured_llm(
     enforce_schema_at_api=True,
     final_llm=None,
 ):
+    """Keep valid model output; use a separate formatter only when validation fails."""
     config = {"metadata": call_metadata} if call_metadata else None
 
-    if final_llm is not None:
-        if llm is final_llm and not (use_tools and df is not None):
-            return final_llm.with_structured_output(
-                schema,
-                method="json_schema",
-            ).invoke(messages, config=config)
-
-        if use_tools and df is not None:
-            _, history = invoke_with_tools(
-                llm,
-                messages,
-                df,
-                config=config,
-                return_history=True,
-            )
-        else:
-            history = list(messages) if isinstance(messages, list) else [HumanMessage(content=messages)]
-            history.append(llm.invoke(history, config=config))
-
-        history = [_include_reasoning_in_history(message) for message in history]
+    if final_llm is not None and llm is final_llm and not (use_tools and df is not None):
         return final_llm.with_structured_output(
             schema,
             method="json_schema",
-        ).invoke(history, config=config)
+        ).invoke(messages, config=config)
 
-    if enforce_schema_at_api and not (use_tools and df is not None):
+    if final_llm is None and enforce_schema_at_api and not (use_tools and df is not None):
         return llm.with_structured_output(
             schema,
             method="json_schema",
         ).invoke(messages, config=config)
 
     if use_tools and df is not None:
-        response = invoke_with_tools(
-            llm,
-            messages,
-            df,
-            config=config,
+        response, history = invoke_with_tools(
+            llm, messages, df, config=config, return_history=True,
         )
+        if response is None:
+            response = llm.invoke(history, config=config)
     else:
         response = llm.invoke(messages, config=config)
-
-    if not isinstance(response.content, str):
-        raise ValueError("Locally validated structured response must be JSON text")
-
-    _, content = after_think(response.content)
-    content = strip_code_fences(content)
-    parsed = json.loads(content)
-    return schema.model_validate(parsed)
+    parsed_response = _UNPARSED
+    try:
+        parsed_response = _parse_response_json(response)
+        return schema.model_validate(parsed_response)
+    except (TypeError, ValueError):
+        return _format_structured_response(
+            response,
+            schema,
+            final_llm or llm,
+            call_metadata,
+            parsed_response,
+        )
 
 
 def determine_dataset_usability_call(llm, metadata, call_metadata=None) -> dict:
@@ -1071,7 +1111,7 @@ def generate_graph_questions(
         "- Do NOT ask questions that require more data than what is shown/described.\n"
         "- Do NOT produce questions that are just instructions like 'analyze' or 'explain how'.\n"
         "- Avoid vague questions. Each must have a single, checkable answer.\n"
-        "- If exact numeric values are not available, ask questions that accept approximate answers only when the chart clearly supports approximation.\n"
+        "- If exact numeric values are not visible, ask for an approximate answer only when the chart clearly supports an estimate. Phrase the question as approximate and round the answer to chart-readable precision.\n"
         "- Every answer must be grounded in the image; use the descriptions for variable meanings, not unseen values."
         "\n"
         "Output format (STRICT):\n"
@@ -1103,29 +1143,43 @@ def generate_graph_questions(
     with open(png_path, "rb") as f:
         png_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    msg = HumanMessage(
-        content=[
-            {"type": "text", "text": qa_prompt},
-            {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
-            {"type": "text", "text": f"PLOT DESCRIPTION:\n{plot_desc}"},
-            {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
-        ]
-    )
+    last_count = None
+    for attempt in range(MAX_QUESTION_COUNT_ATTEMPTS):
+        prompt = qa_prompt
+        if last_count is not None:
+            prompt += (
+                f"\nThe previous attempt returned {last_count} questions. "
+                f"Generate a complete new set of EXACTLY {num} questions.\n"
+            )
 
-    response = invoke_structured_llm(
-        llm,
-        [msg],
-        GraphQuestions,
-        graph_df,
-        use_tools,
-        call_metadata,
-        enforce_schema_at_api=False,
-        final_llm=final_llm,
-    )
-    if len(response.questions) != num:
-        raise ValueError(f"Expected {num} questions, received {len(response.questions)}")
-    return [question.model_dump() for question in response.questions]
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+                {"type": "text", "text": f"DATASET DESCRIPTION:\n{dataset_desc}"},
+                {"type": "text", "text": f"PLOT DESCRIPTION:\n{plot_desc}"},
+                {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+            ]
+        )
+
+        metadata = call_metadata
+        if attempt:
+            metadata = {**(call_metadata or {}), "question_count_retry": attempt}
+        response = invoke_structured_llm(
+            llm,
+            [msg],
+            GraphQuestions,
+            graph_df,
+            use_tools,
+            metadata,
+            enforce_schema_at_api=False,
+            final_llm=final_llm,
+        )
+        last_count = len(response.questions)
+        if last_count == num:
+            return [question.model_dump() for question in response.questions]
+
+    raise ValueError(f"Expected {num} questions, received {last_count}")
 
 
 def generate_graph_question_one(
@@ -1164,6 +1218,7 @@ def generate_graph_question_one(
         "- Phrase domain questions using real-world entities and measurements, not generic axes or series. Connect a visible pattern to a variable meaning stated in the DATASET DESCRIPTION.\n"
         "- Example only for handwriting data: 'Given that point_1_y is the stroke's starting height, which digit class tends to begin highest?' not 'Which series has the highest y-values?' Use this dataset's actual terms instead.\n"
         "- For inference questions, ask what the visible pattern supports about the real-world subject; an answer that the chart cannot distinguish groups is valid when overlap is clear. Do not guess a class from an ambiguous individual point.\n"
+        "- If a numeric value can only be estimated from the chart, ask for an approximate answer and give it at chart-readable precision, not with hidden extra decimals.\n"
         "- Avoid generic questions about statistical or plotting methods (e.g., what PCA does). Use only domain facts supplied in the descriptions; do not invent domain explanations.\n"
         "- Do not repeat the same question pattern; vary them.\n"
         "- Questions should be related to the graph and the data in the graph, do NOT ask general questions about the dataset that do not directly relate to the chart.\n"
@@ -1227,9 +1282,18 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "Set valid to true only if the proposed answer is correct and checkable "
         "from visible chart evidence alone or together with domain facts explicitly "
         "stated in the dataset description. Simple arithmetic on visible values is allowed.\n"
+        "For numeric questions, use the precision the chart supports. Mark valid when "
+        "the correct mark, series, or category is identifiable and the proposed value "
+        "is consistent with a reasonable visual estimate from the axis, ticks, labels, "
+        "or marks. Extra decimal places in the proposed answer do not make it invalid "
+        "if its rounded or approximate value is readable from the image. Allow a "
+        "reasonable visual tolerance based on tick spacing and image resolution.\n"
         "Set valid to false if the answer needs unseen values, unstated domain facts, "
         "or general statistical/visualization theory (e.g., what PCA does), or if "
-        "the question does not require visible chart evidence.\n"
+        "the question does not require visible chart evidence. An approximate value "
+        "does not make a hidden quantity, such as a filtered row count, answerable. "
+        "Also reject values that conflict with the chart or marks that cannot be "
+        "distinguished well enough to identify the answer.\n"
         'Return ONLY JSON: {"judgments": [{"valid": true}, {"valid": false}, ...]}.'
     )
     with open(png_path, "rb") as file:

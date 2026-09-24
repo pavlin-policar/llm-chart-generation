@@ -12,6 +12,7 @@ import base64
 import html
 import json
 import os
+import sys
 from collections import Counter, defaultdict
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +20,9 @@ from urllib.parse import urlencode
 
 import streamlit as st
 from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from feedback_corrections import correction_rows, summarize_error_corrections
 
 from chart_types import canonicalize_chart_type as canonicalize
 from indexer import build_index, read_records
@@ -360,6 +364,7 @@ def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
     execution_errors = int(error_counts.get("code_execution", 0))
     regeneration_errors = int(error_counts.get("code_regeneration", 0))
     feedback_evaluations, feedback_error_types = summarize_feedback_errors(records)
+    feedback_corrections = summarize_error_corrections(records)
     return {
         "name": dataset_name,
         "chart_count": chart_count,
@@ -375,6 +380,7 @@ def compute_generation_metrics(dataset_name: str, records: list[dict]) -> dict:
         "acceptance_by_iteration": acceptance_by_iteration,
         "feedback_evaluations": feedback_evaluations,
         "feedback_error_types": feedback_error_types,
+        "feedback_corrections": feedback_corrections,
         "error_rates": {
             "code_execution": {
                 "count": execution_errors,
@@ -513,6 +519,20 @@ def render_generation_metrics(metrics: list[dict], standalone: bool = False) -> 
             st.dataframe(feedback_rows, use_container_width=True, hide_index=True)
         else:
             st.caption("No structured feedback errors available.")
+
+        st.markdown("**Observed error corrections**")
+        st.caption(
+            "Each continuous run of an error type on a chart is one episode. "
+            "A correction is observed when a later structured evaluation no longer "
+            "reports that type; a reappearing type starts a new episode. "
+            "Revision counts run from the first report to that evaluation. "
+            "Episodes without later structured feedback remain unconfirmed."
+        )
+        corrections = correction_rows(metrics)
+        if corrections:
+            st.dataframe(corrections, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No structured feedback error episodes available.")
 
 
 # ---------------------------------------------------------------------------
@@ -1606,6 +1626,11 @@ def render_questions(
         qtype = q.get("type", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
+        validity = q.get("valid")
+        viability = (
+            "Viable" if validity is True else
+            "Not viable" if validity is False else "Not evaluated"
+        )
 
         frac = q_accuracy(qtext)
         marker_id = f"qacc-{gid[:8]}-{i}"
@@ -1626,7 +1651,8 @@ def render_questions(
                 unsafe_allow_html=True,
             )
 
-        with st.expander(f"Q{i}. [{qtype}] {qtext}", expanded=False):
+        with st.expander(f"Q{i}. [{qtype}] [{viability}] {qtext}", expanded=False):
+            st.caption(f"Question viability: {viability}")
             st.markdown(f"**Ground truth:** {answer}")
             if basis:
                 st.caption(f"Answer basis: {basis}")

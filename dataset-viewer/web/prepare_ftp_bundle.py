@@ -18,12 +18,16 @@ import gzip
 import json
 import random
 import shutil
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from feedback_corrections import summarize_error_corrections
 
 
 CANONICAL_TYPE_MAP = {
@@ -305,6 +309,7 @@ def build_generation_metrics(
     execution_errors = int(error_counts.get("code_execution", 0))
     regeneration_errors = int(error_counts.get("code_regeneration", 0))
     feedback_evaluations, feedback_error_types = summarize_feedback_errors(records)
+    feedback_corrections = summarize_error_corrections(records)
     return {
         "name": generation_name,
         "chart_count": chart_count,
@@ -320,6 +325,7 @@ def build_generation_metrics(
         "acceptance_by_iteration": acceptance_by_iteration,
         "feedback_evaluations": feedback_evaluations,
         "feedback_error_types": feedback_error_types,
+        "feedback_corrections": feedback_corrections,
         "error_rates": {
             "code_execution": {
                 "count": execution_errors,
@@ -740,7 +746,7 @@ def build(args: argparse.Namespace) -> None:
 
     type_counts = Counter(row["canonical_type"] for row in chart_index)
     manifest = {
-        "schema_version": 6,
+        "schema_version": 7,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_url": args.base_url,
         "chart_index": "charts.jsonl.gz",

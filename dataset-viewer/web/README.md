@@ -7,15 +7,16 @@ chart detail page is opened.
 
 The grid and detail view display chart acceptance, the sidebar can filter by
 accepted or non-accepted charts, and each selected iteration shows its feedback
-directly above its code. Each chart detail also joins typed `llm_calls` messages,
-marks included images, displays provider reasoning traces, and retains access to
-the exact payload stored in its source `metadata.jsonl` record.
+directly above its code. Question headings show the stored viability judgment.
+Each chart detail also joins typed `llm_calls` messages, marks included images,
+displays provider reasoning traces, and retains access to the exact payload
+stored in its source `metadata.jsonl` record.
 
 The dataset metrics panel compares cumulative acceptance, generation errors,
-and structured feedback-error frequency and severity by type. It is displayed
-on a dedicated page opened from the sidebar. The values are stored in manifest
-schema version 6; regenerate the static bundle after changing metadata or
-error logs.
+structured feedback-error frequency and severity by type, and observed error
+corrections by the number of revisions they took. It is displayed on a dedicated
+page opened from the sidebar. The values are stored in manifest schema version 7;
+regenerate the static bundle after changing metadata or error logs.
 
 The public deployment is available at
 <https://llm-chart-generation.streamlit.app>.

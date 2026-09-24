@@ -10,12 +10,16 @@ import gzip
 import html
 import json
 import os
+import sys
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import urlencode
 
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from feedback_corrections import correction_rows
 
 
 DEFAULT_MANIFEST_URL = "https://file.biolab.si/llm-chart-generation/manifest.json"
@@ -256,6 +260,22 @@ def render_generation_metrics(
             st.dataframe(feedback_rows, use_container_width=True, hide_index=True)
         else:
             st.caption("No structured feedback errors available.")
+
+        st.markdown("**Observed error corrections**")
+        st.caption(
+            "Each continuous run of an error type on a chart is one episode. "
+            "A correction is observed when a later structured evaluation no longer "
+            "reports that type; a reappearing type starts a new episode. "
+            "Revision counts run from the first report to that evaluation. "
+            "Episodes without later structured feedback remain unconfirmed."
+        )
+        corrections = correction_rows(metrics)
+        if corrections:
+            st.dataframe(corrections, use_container_width=True, hide_index=True)
+        elif manifest.get("schema_version", 0) < 7:
+            st.caption("Regenerate the static bundle to include correction statistics.")
+        else:
+            st.caption("No structured feedback error episodes available.")
 
 
 def render_page_navigation() -> str:
@@ -1369,6 +1389,11 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
         qtype = q.get("type", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
+        validity = q.get("valid")
+        viability = (
+            "Viable" if validity is True else
+            "Not viable" if validity is False else "Not evaluated"
+        )
 
         frac = q_accuracy(qtext)
         marker_id = f"qacc-{gid[:8]}-{i}"
@@ -1389,7 +1414,8 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
                 unsafe_allow_html=True,
             )
 
-        with st.expander(f"Q{i}. [{qtype}] {qtext}", expanded=False):
+        with st.expander(f"Q{i}. [{qtype}] [{viability}] {qtext}", expanded=False):
+            st.caption(f"Question viability: {viability}")
             st.markdown(f"**Ground truth:** {answer}")
             if basis:
 
