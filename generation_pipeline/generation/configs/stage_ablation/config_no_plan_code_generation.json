@@ -32,7 +32,7 @@
     "plan_code_generation": {
       "active": false,
       "parameters": {
-        "reasoning": false,
+        "reasoning": true,
         "tools": false
       }
     },
@@ -46,7 +46,7 @@
     "feedback": {
       "parameters": {
         "reasoning": true,
-        "feedback_type": "per_error"
+        "feedback_type": "per_error_exhaustive"
       }
     },
     "code_regeneration": {

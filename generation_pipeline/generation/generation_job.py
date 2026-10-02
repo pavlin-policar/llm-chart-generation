@@ -26,6 +26,7 @@ from calls import (
     plan_call,
     recode_call,
     replace_vars_call,
+    sanitize_dataset_description_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
 from vllm_openai import VLLMChatOpenAI
@@ -690,6 +691,7 @@ def build_metadata(
         "dataset": {
             "id": dataset_id,
             "description": dataset_sem["description"],
+            "sanitized_description": dataset_sem["sanitized_description"],
             "old_feature_names": old_names,
             "feature_names": new_names,
         },
@@ -894,6 +896,7 @@ def generate_graph(
                     description,
                     graph_data,
                     questions,
+                    sanitized_dataset_desc=dataset_sem["sanitized_description"],
                     graph_df=graph_df,
                     use_tools=stage_uses_tools(stages, "questions"),
                     call_metadata={"stage_name": "questions"},
@@ -910,6 +913,7 @@ def generate_graph(
                 description,
                 graph_data,
                 num_questions,
+                sanitized_dataset_desc=dataset_sem["sanitized_description"],
                 graph_df=graph_df,
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},
@@ -921,7 +925,7 @@ def generate_graph(
             judgments = judge_graph_questions(
                 questions_llm,
                 final_img_path,
-                dataset_sem["description"],
+                dataset_sem["sanitized_description"],
                 questions,
                 call_metadata={"stage_name": "question_judge"},
                 final_llm=llm,
@@ -1023,6 +1027,18 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
                 dataset_sem,
                 df,
             )
+
+        print("Sanitizing dataset description...")
+        try:
+            dataset_sem["sanitized_description"] = sanitize_dataset_description_call(
+                llm,
+                dataset_sem["description"],
+                call_metadata={"stage_name": "sanitize_description"},
+            )["description"]
+        except Exception as error:
+            log_error("sanitize_description", error)
+            print(f"Couldn't sanitize description for dataset {dataset_id}, skipping... {error}")
+            continue
 
         graph_types = generate_graph_types(
             dataset_id,
