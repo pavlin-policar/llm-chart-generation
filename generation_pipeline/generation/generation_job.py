@@ -22,6 +22,7 @@ from calls import (
     graph_error_call,
     graph_evaluation_call,
     graphs_call,
+    judge_graph_question_data,
     judge_graph_questions,
     plan_call,
     recode_call,
@@ -931,7 +932,20 @@ def generate_graph(
                 final_llm=llm,
             )
             for question, valid in zip(questions, judgments):
-                question["valid"] = valid
+                question["vlisual_valid"] = valid
+
+        CURRENT_STAGE = "question_data_judge"
+        data_judgments = judge_graph_question_data(
+            questions_llm,
+            questions,
+            graph_df,
+            graph_data,
+            code,
+            call_metadata={"stage_name": "question_data_judge"},
+            final_llm=llm,
+        )
+        for question, data_valid in zip(questions, data_judgments):
+            question["data_valid"] = data_valid
 
         CURRENT_STAGE = "question_labeling"
         label_questions(questions, stages, llm, llm_think)

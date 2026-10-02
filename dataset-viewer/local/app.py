@@ -1626,7 +1626,7 @@ def render_questions(
         qtype = q.get("type", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
-        validity = q.get("valid")
+        validity = q.get("vlisual_valid", q.get("valid"))
         viability = (
             "Viable" if validity is True else
             "Not viable" if validity is False else "Not evaluated"

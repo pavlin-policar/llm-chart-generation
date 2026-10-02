@@ -115,11 +115,19 @@ class GraphQuestions(StrictModel):
 
 
 class QuestionValidity(StrictModel):
-    valid: bool
+    vlisual_valid: bool
 
 
 class QuestionValidityResults(StrictModel):
     judgments: list[QuestionValidity]
+
+
+class DataQuestionValidity(StrictModel):
+    data_valid: bool
+
+
+class DataQuestionValidityResults(StrictModel):
+    judgments: list[DataQuestionValidity]
 
 
 class QuestionTypes(
@@ -1058,6 +1066,9 @@ def describe_graph_png(
         "\n"
         "Output rules:\n"
         "- Put the complete description in the `description` response field.\n"
+        "- Only your final assistant response, after all tool calls are complete, will be saved. Earlier messages will not be included.\n"
+        "- If you use tools after writing a draft, repeat the complete description in your final response, incorporating any corrections from the tool results.\n"
+        "- Return the full description with all six sections in the `description` field of a JSON object. A verification summary, completion confirmation, or reference to a description 'above' is not sufficient.\n"
         "- Use clear section headers exactly as provided below.\n"
         "- Be very detailed, but never invent values or categories.\n"
         "- When describing numeric ranges, counts, or extrema, compute them from `graph_df` (not from the image).\n"
@@ -1154,7 +1165,7 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
     "or the answer in the question.\n"
     "3. First formulate a question supported by the visible evidence; then "
     "verify its answer using the FULL DATASET DESCRIPTION, CHART DESCRIPTION, "
-    "graph_data, and optional tools over the final plotted dataframe. These "
+    "graph_data, and available tools over the final plotted dataframe. These "
     "are GENERATOR-ONLY sources: use them only to identify the exact plotted "
     "quantity and verify reference answers. They cannot justify an otherwise "
     "unanswerable question. Previous questions and answers are only for "
@@ -1181,6 +1192,21 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
     "addition to the image; otherwise use 'image'. Context stated in the "
     "question does not itself require 'both'. Verification sources do not "
     "affect this field.\n\n"
+)
+
+
+QUESTION_TOOL_VERIFICATION_INSTRUCTIONS = (
+    "MANDATORY TOOL VERIFICATION:\n"
+    "- Before final output, validate EVERY data-dependent question and answer with run_pandas "
+    "computations on df. Batch checks are allowed; label results by question number.\n"
+    "- Match plotted filters, transformations, and aggregations. Check all "
+    "data-dependent premises and answer claims, including comparisons and 'most' claims. "
+    "Check visual-only facts against the image.\n"
+    "- In every run_pandas call, assign computed evidence to the Python variable "
+    "`result` (e.g., result = df['value'].mean()). Do not use print(). "
+    "Only status='ok' counts; errors, "
+    "hardcoded answers, and verification strings are NOT evidence. Correct errors "
+    "and retry. Revise or replace unsupported questions before returning final JSON.\n\n"
 )
 
 
@@ -1247,6 +1273,7 @@ def generate_graph_questions(
         f"- {hard} hard (definitively answerable multi-step reasoning grounded in the chart and supplied context, such as combining multiple observations through a calculation, comparison, or explicitly supplied rule; these should be questions an expert would ask when looking at the chart)\n"
         f"- At least {max(1, num // 4)} MUST be domain-focused; at least {max(1, num // 10)} of these MUST ask for a checkable domain inference rather than just read a value.\n\n"
         + QUESTION_EVIDENCE_INSTRUCTIONS
+        + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
         + "FINAL CHECK: verify answers, visual answerability, diversity, difficulty/domain coverage, and the exact question count.\n\n"
         "Output format (STRICT):\n"
@@ -1322,6 +1349,7 @@ def generate_graph_question_one(
         "Use a different visual element, relationship, or reasoning pattern "
         "from previous questions where possible.\n\n"
         + QUESTION_EVIDENCE_INSTRUCTIONS
+        + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
     )
     if len(previous_questions) % 4 == 0:
@@ -1385,7 +1413,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "Judge each QUESTION and its proposed ANSWER in order. Use ONLY the chart image, "
         "SANITIZED DATASET DESCRIPTION, and context explicitly supplied in the question; no rich descriptions, plotting code, "
         "hidden data, or outside knowledge.\n"
-        "Set valid to true only if the proposed answer is correct and checkable "
+        "Set vlisual_valid to true only if the proposed answer is correct and checkable "
         "from visible chart evidence alone or together with domain facts explicitly "
         "stated in the sanitized dataset description or question. Simple arithmetic on visible values is allowed.\n"
         "STRICT OUTSIDE-KNOWLEDGE CHECK:\n"
@@ -1398,7 +1426,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "still requires reading distinguishable chart evidence. "
         "Ordinary language comprehension, reading chart encodings, arithmetic, "
         "and logical deductions from the supplied evidence are allowed.\n"
-        "Set valid to false if any necessary factual premise comes from outside "
+        "Set vlisual_valid to false if any necessary factual premise comes from outside "
         "knowledge, even if you know it, regard it as common knowledge, or "
         "believe the proposed answer is factually correct. Do not use your "
         "training knowledge to fill missing context. Do not assume typical "
@@ -1408,7 +1436,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "must not give away the answer or reveal hidden plotted observations. "
         "Assertions in the proposed answer do not supply missing context. "
         "If you cannot establish "
-        "that all necessary premises are supported, set valid to false.\n"
+        "that all necessary premises are supported, set vlisual_valid to false.\n"
         "Examples: 'Which horse group has the highest plotted pulse?' may be "
         "valid when the chart supports the comparison. 'Which horse group "
         "needs emergency treatment?' is invalid when answering requires "
@@ -1427,14 +1455,14 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "whether every digit can be read. For instance, reference 9.543 is valid "
         "for a bar readable as about 9.5. Respect units and axis multipliers: "
         "9543 is about 9.5 thousand, not 9.5 in unscaled units.\n"
-        "Set valid to false if the answer needs unseen values, unstated domain facts, "
+        "Set vlisual_valid to false if the answer needs unseen values, unstated domain facts, "
         "or statistical/visualization theory not supplied in the allowed context, or if "
         "the question does not require visible chart evidence, including questions "
         "answerable from the sanitized context or question wording alone. An approximate value "
         "does not make a hidden quantity, such as a filtered row count, answerable. "
         "Also reject values that conflict with the chart or marks that cannot be "
         "distinguished well enough to identify the answer.\n"
-        'Return ONLY JSON: {"judgments": [{"valid": true}, {"valid": false}, ...]}.'
+        'Return ONLY JSON: {"judgments": [{"vlisual_valid": true}, {"vlisual_valid": false}, ...]}.'
     )
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
@@ -1456,7 +1484,48 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
     )
     if len(response.judgments) != len(questions):
         raise ValueError("Question grounding judgment count does not match questions")
-    return [judgment.valid for judgment in response.judgments]
+    return [judgment.vlisual_valid for judgment in response.judgments]
+
+
+def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None):
+    """Check data-dependent question-answer claims using the plotted dataframe."""
+    if graph_df is None:
+        raise ValueError("Question data validation requires the plotted dataframe")
+    prompt = (
+        "Validate every QUESTION and proposed ANSWER in order against the plotted data. "
+        "Use run_pandas on df to verify EVERY data-dependent premise and answer claim. "
+        "Match plotted filters, transformations, aggregations, bins, units, and axis scaling. "
+        "Check comparisons and denominators; 'most' means more than half. Allow stated approximations.\n"
+        "In every run_pandas call, assign computed evidence to the Python variable `result`. "
+        "Do not use print(). Batch checks are allowed; label results by question number. "
+        "Only status='ok' computations on df count as evidence; hardcoded answers or "
+        "verification strings do not. Correct tool errors and retry.\n"
+        "Set data_valid=false for incorrect, unsupported, or unverified data-dependent claims. "
+        "Set data_valid=true only when all such claims are supported, or when the pair contains "
+        "no data-dependent claims. Visual answerability is checked separately. "
+        "Do not rewrite or remove questions. Return exactly one judgment per question in order.\n"
+        'Return ONLY JSON: {"judgments": [{"data_valid": true}, {"data_valid": false}, ...]}.'
+    )
+    pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
+    message = HumanMessage(content=[
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
+        {"type": "text", "text": f"PLOT CODE:\n{plot_code}"},
+        {"type": "text", "text": f"QUESTIONS:\n{json.dumps(pairs, ensure_ascii=False)}"},
+    ])
+    response = invoke_structured_llm(
+        llm,
+        [message],
+        DataQuestionValidityResults,
+        df=graph_df,
+        use_tools=True,
+        call_metadata=call_metadata,
+        enforce_schema_at_api=False,
+        final_llm=final_llm,
+    )
+    if len(response.judgments) != len(questions):
+        raise ValueError("Question data judgment count does not match questions")
+    return [judgment.data_valid for judgment in response.judgments]
 
 
 def give_question_types(llm, questions, call_metadata=None):  # No reasoning

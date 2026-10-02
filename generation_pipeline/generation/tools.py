@@ -100,6 +100,8 @@ FORBIDDEN_NODES = (
 class PandasCodeValidator(ast.NodeVisitor):
     def visit(self, node):
         if isinstance(node, FORBIDDEN_NODES):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                raise ValueError("Imports are not allowed. Use the already available `pd` and `np`.")
             raise ValueError(f"{type(node).__name__} is not allowed")
         return super().visit(node)
 
@@ -114,6 +116,8 @@ class PandasCodeValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id == "print":
+            raise ValueError("print() is not available. Assign the value to `result` instead.")
         if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
             raise ValueError(f"{node.func.id}() is not allowed")
 
@@ -178,6 +182,15 @@ def _serialize_result(result):
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+def _error_outcome(error, error_code):
+    return {
+        "status": "error",
+        "error_code": error_code,
+        "error_type": type(error).__name__,
+        "message": str(error),
+    }
+
+
 def create_dataframe_tools(df):
     @tool
     def run_pandas(code: str) -> str:
@@ -188,6 +201,10 @@ def create_dataframe_tools(df):
         calculations. Assign the value to return to a variable named `result`.
         The dataframe is a deep copy, and imports, private attributes, file I/O,
         plotting, and inplace mutation are blocked.
+        Use `result`, not print(), to return values. Returns JSON with
+        status="ok" and result, or status="error" with error_code, error_type,
+        and message. An error means the computation did not succeed;
+        correct the code and call the tool again.
 
         Example:
         result = (
@@ -197,15 +214,23 @@ def create_dataframe_tools(df):
         )
         """
 
-        tree = _validate_pandas_code(code)
-        namespace = {
-            "__builtins__": SAFE_BUILTINS,
-            "df": df.copy(deep=True),
-            "np": np,
-            "pd": pd,
-        }
-        exec(compile(tree, "<pandas-tool>", "exec"), namespace, namespace)
-        return _serialize_result(namespace["result"])
+        try:
+            tree = _validate_pandas_code(code)
+        except Exception as error:
+            return json.dumps(_error_outcome(error, "invalid_code"), ensure_ascii=False)
+
+        try:
+            namespace = {
+                "__builtins__": SAFE_BUILTINS,
+                "df": df.copy(deep=True),
+                "np": np,
+                "pd": pd,
+            }
+            exec(compile(tree, "<pandas-tool>", "exec"), namespace, namespace)
+            result = json.loads(_serialize_result(namespace["result"]))
+            return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
+        except Exception as error:
+            return json.dumps(_error_outcome(error, "execution_error"), ensure_ascii=False)
 
     return [run_pandas]
 
@@ -215,7 +240,9 @@ def create_code_execution_tool(df, selected_plot):
     def execute_plot_code(code: str) -> str:
         """Execute plotting code with `df`, `selected_plot`, and `graph_file_path` available.
 
-        Returns the execution error and whether a non-empty image was created.
+        Returns JSON with status="ok" or status="error", the execution error,
+        and whether a non-empty image was created. Failures also include
+        error_code, error_type, and message.
         """
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -227,16 +254,20 @@ def create_code_execution_tool(df, selected_plot):
                 "__builtins__": __builtins__,
             }
             error = None
+            outcome = {"status": "ok"}
             try:
                 exec(compile(code, "<plot-code-tool>", "exec"), namespace, namespace)
             except Exception as exception:
                 error = f"{type(exception).__name__}: {exception}"
+                outcome = _error_outcome(exception, "execution_error")
 
             image_created = os.path.isfile(graph_file_path) and os.path.getsize(graph_file_path) > 0
             if error is None and not image_created:
                 error = "Generated code did not save an image"
+                outcome = _error_outcome(ValueError(error), "image_not_created")
 
-            return json.dumps({"error": error, "image_created_successfully": error is None and image_created})
+            outcome.update({"error": error, "image_created_successfully": error is None and image_created})
+            return json.dumps(outcome, ensure_ascii=False)
 
     return execute_plot_code
 
@@ -261,12 +292,12 @@ def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return
         for tool_call in response.tool_calls:
             dataframe_tool = tools_by_name.get(tool_call["name"])
             if dataframe_tool is None:
-                result = f"Unknown tool: {tool_call['name']}"
+                result = json.dumps(_error_outcome(ValueError(f"Unknown tool: {tool_call['name']}"), "unknown_tool"))
             else:
                 try:
                     result = dataframe_tool.invoke(tool_call.get("args", {}))
                 except Exception as error:
-                    result = f"Tool error: {error}"
+                    result = json.dumps(_error_outcome(error, "tool_invocation_error"), ensure_ascii=False)
 
             history.append(
                 ToolMessage(
