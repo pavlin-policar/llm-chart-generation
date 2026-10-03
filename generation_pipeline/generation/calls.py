@@ -1337,34 +1337,41 @@ def generate_graph_question_one(
     final_llm=None,
     *,
     sanitized_dataset_desc,
+    difficulty,
 ) -> dict:
     """Generate one chart question using all previous questions as context."""
 
     # TODO: No access to previous questions option
 
+    difficulty_instructions = {
+        "easy": "Direct reading of visible titles, axes, legends, labeled values, or obvious comparisons.",
+        "medium": "Interpretation of visible comparisons across groups, trends, approximate ranges, or notable patterns.",
+        "hard": "Multi-step reasoning combining distinguishable chart observations through a calculation, comparison, or explicitly supplied rule. Do not substitute an easy question or require hidden statistics.",
+    }
     prompt = (
         "You are a chart QA generator.\n"
-        "TASK:\n"
+        "TASK AND DIFFICULTY:\n"
         "Generate EXACTLY ONE new question and answer about the chart. "
-        "Use a different visual element, relationship, or reasoning pattern "
-        "from previous questions where possible.\n\n"
+        f"This is accepted-question slot {len(previous_questions) + 1}. "
+        f"Required difficulty: {difficulty}. {difficulty_instructions[difficulty]}\n"
+        "STRICT DISTINCTNESS: Compare the candidate with EVERY previous question. "
+        "Do not repeat or closely paraphrase a question, reverse the same comparison, "
+        "change only a threshold, number, category name, or wording, or ask another "
+        "question that tests the same underlying observation and reasoning. "
+        "Choose a materially different visual fact, relationship, or reasoning task.\n"
+        "DATASET CONTEXT IS OPTIONAL: Prefer questions answerable from the image alone. "
+        "There is no requirement to use the dataset description or generate "
+        "domain-focused questions for this chart. Use the sanitized dataset description "
+        "only when it is genuinely needed to interpret visible chart evidence; "
+        "do not add domain context merely to force answer_basis='both'.\n\n"
         + QUESTION_EVIDENCE_INSTRUCTIONS
         + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
     )
-    if len(previous_questions) % 4 == 0:
-        prompt += (
-            "THIS QUESTION: MUST be domain-focused using a visible pattern "
-            "and a supplied variable meaning.\n"
-        )
-    if len(previous_questions) % 8 == 4:
-        prompt += (
-            "THIS QUESTION: MUST ask for a checkable domain inference from the "
-            "visible pattern, not merely the name or value of a plotted item.\n"
-        )
 
     prompt += (
-        "\nFINAL CHECK: verify the answer, visual answerability, required domain focus, and distinctness from previous questions.\n\n"
+        "\nFINAL CHECK: verify the answer, visual answerability, assigned difficulty, "
+        "and strict distinctness from every previous question.\n\n"
         "Output format (STRICT):\n"
         'Return JSON only in this shape: {"question": "<question text>", "answer": "<answer text>", "answer_basis": "image"}.\n'
         "Replace placeholders; use exactly these three string fields, without a questions array. answer_basis must be 'image' or 'both'.\n"

@@ -586,7 +586,9 @@ def review_and_regenerate(
                         recode_llm,
                         dataset_sem.get("features"),
                         selected_plot,
-                        df.head(5).to_dict(orient="records"),
+                        json.loads(
+                            df.head(5).to_json(orient="records", date_format="iso")
+                        ),
                         previous_code=code,
                         execution_error=str(exec_error),
                         df=df,
@@ -775,7 +777,9 @@ def generate_graph(
         code_llm,
         dataset_sem.get("features"),
         selected_plot,
-        df.head(5).to_dict(orient="records"),
+        json.loads(
+            df.head(5).to_json(orient="records", date_format="iso")
+        ),
         plan,
         df=df,
         use_tools=stage_uses_tools(stages, "code_generation"),
@@ -810,7 +814,9 @@ def generate_graph(
                 code_llm,
                 dataset_sem.get("features"),
                 selected_plot,
-                df.head(5).to_dict(orient="records"),
+                json.loads(
+                    df.head(5).to_json(orient="records", date_format="iso")
+                ),
                 previous_code=code,
                 execution_error=str(exec_error),
                 df=df,
@@ -889,22 +895,58 @@ def generate_graph(
 
         if one_by_one:
             questions = []
-            for _ in range(num_questions):
+            valid_questions = []
+            easy = round(num_questions * 0.35)
+            medium = round(num_questions * 0.30)
+            difficulties = (
+                ["easy"] * easy
+                + ["medium"] * medium
+                + ["hard"] * (num_questions - easy - medium)
+            )
+            while len(valid_questions) < num_questions:
+                CURRENT_STAGE = "questions"
+                difficulty = difficulties[len(valid_questions)]
                 quest = generate_graph_question_one(
                     questions_llm,
                     final_img_path,
                     dataset_sem["description"],
                     description,
                     graph_data,
-                    questions,
+                    valid_questions,
                     sanitized_dataset_desc=dataset_sem["sanitized_description"],
+                    difficulty=difficulty,
                     graph_df=graph_df,
                     use_tools=stage_uses_tools(stages, "questions"),
                     call_metadata={"stage_name": "questions"},
                     final_llm=llm,
                 )
+                quest["difficulty"] = difficulty
 
+                CURRENT_STAGE = "question_judge"
+                quest["vlisual_valid"] = judge_graph_questions(
+                    questions_llm,
+                    final_img_path,
+                    dataset_sem["sanitized_description"],
+                    [quest],
+                    call_metadata={"stage_name": "question_judge"},
+                    final_llm=llm,
+                )[0]
+
+                CURRENT_STAGE = "question_data_judge"
+                quest["data_valid"] = judge_graph_question_data(
+                    questions_llm,
+                    [quest],
+                    graph_df,
+                    graph_data,
+                    code,
+                    call_metadata={"stage_name": "question_data_judge"},
+                    final_llm=llm,
+                )[0]
+
+                # Keep every candidate for review, but only count passing pairs.
                 questions.append(quest)
+                if quest["vlisual_valid"] and quest["data_valid"]:
+                    valid_questions.append(quest)
 
         else:
             questions = generate_graph_questions(
@@ -921,31 +963,32 @@ def generate_graph(
                 final_llm=llm,
             )
 
-        if stages["questions"].get("parameters", {}).get("grounding_judge", True):
-            CURRENT_STAGE = "question_judge"
-            judgments = judge_graph_questions(
+        if not one_by_one:
+            if stages["questions"].get("parameters", {}).get("grounding_judge", True):
+                CURRENT_STAGE = "question_judge"
+                judgments = judge_graph_questions(
+                    questions_llm,
+                    final_img_path,
+                    dataset_sem["sanitized_description"],
+                    questions,
+                    call_metadata={"stage_name": "question_judge"},
+                    final_llm=llm,
+                )
+                for question, valid in zip(questions, judgments):
+                    question["vlisual_valid"] = valid
+
+            CURRENT_STAGE = "question_data_judge"
+            data_judgments = judge_graph_question_data(
                 questions_llm,
-                final_img_path,
-                dataset_sem["sanitized_description"],
                 questions,
-                call_metadata={"stage_name": "question_judge"},
+                graph_df,
+                graph_data,
+                code,
+                call_metadata={"stage_name": "question_data_judge"},
                 final_llm=llm,
             )
-            for question, valid in zip(questions, judgments):
-                question["vlisual_valid"] = valid
-
-        CURRENT_STAGE = "question_data_judge"
-        data_judgments = judge_graph_question_data(
-            questions_llm,
-            questions,
-            graph_df,
-            graph_data,
-            code,
-            call_metadata={"stage_name": "question_data_judge"},
-            final_llm=llm,
-        )
-        for question, data_valid in zip(questions, data_judgments):
-            question["data_valid"] = data_valid
+            for question, data_valid in zip(questions, data_judgments):
+                question["data_valid"] = data_valid
 
         CURRENT_STAGE = "question_labeling"
         label_questions(questions, stages, llm, llm_think)
