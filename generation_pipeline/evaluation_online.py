@@ -270,7 +270,7 @@ if __name__ == "__main__":
         for line in tqdm(f, desc="Loading metadata"):
             graph = json.loads(line)
 
-            image = graph["images"][-1]
+            image = next((img for img in graph["images"] if img.get("selected")), graph["images"][-1])
             questions = graph["graph"]["questions"]
             dataset_desc = graph["dataset"]["description"]
 

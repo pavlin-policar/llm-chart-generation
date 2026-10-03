@@ -69,7 +69,8 @@ def _quality(rec: dict) -> str:
     ]
     if not images:
         return "good"
-    last = max(images, key=_iter_sort_key)
+    last = next((img for img in images if img.get("selected")), None)
+    last = last or max(images, key=_iter_sort_key)
     if _iter_sort_key(last) < _REFINEMENT_MAX_ROUNDS:
         return "good"
     fb = last.get("feedback") or ""
@@ -83,7 +84,8 @@ def chart_accepted(rec: dict) -> bool:
     if isinstance(accepted, bool):
         return accepted
     images = ordered_iterations(rec.get("images", []) or [])
-    return bool(images and images[-1].get("accept"))
+    final = next((img for img in images if img.get("selected")), images[-1] if images else {})
+    return bool(final.get("accept"))
 
 
 
@@ -945,7 +947,8 @@ def render_grid(records: list[dict], filter_qp: dict[str, str]) -> None:
     cards: list[str] = []
     for rec in subset:
         iters = ordered_iterations(rec.get("images", []))
-        thumb_path = resolve_image(iters[-1]["path"], rec["_generation_dataset"]) if iters else None
+        final = next((img for img in iters if img.get("selected")), iters[-1] if iters else None)
+        thumb_path = resolve_image(final["path"], rec["_generation_dataset"]) if final else None
         data_uri = thumbnail_data_uri(str(thumb_path)) if thumb_path else ""
         label = rec["_canonical_type"]
         short_id = rec["id"][:8]
@@ -1483,7 +1486,7 @@ def render_detail(rec: dict, result_indexes: dict[str, dict[str, list[tuple[int,
     with left:
         if iters:
             labels = [f"it{i}" for i in range(len(iters))]
-            last_idx = len(iters) - 1
+            last_idx = next((i for i, img in enumerate(iters) if img.get("selected")), len(iters) - 1)
             iter_key = f"iter_{gid}"
             if iter_key not in st.session_state:
                 st.session_state[iter_key] = last_idx

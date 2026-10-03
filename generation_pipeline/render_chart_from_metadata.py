@@ -179,7 +179,7 @@ def choose_code(entry: dict, code_source: str) -> str:
 
     images = entry.get("images") or []
     if images:
-        return images[-1]["code"]
+        return next((img for img in images if img.get("selected")), images[-1])["code"]
     return entry["graph"]["code"]
 
 

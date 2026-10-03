@@ -87,7 +87,7 @@ if __name__ == "__main__":
     connector = Connector(vit_dim=vit_model.config.hidden_size, llm_dim=llm_model.config.hidden_size)
     connector_state_dict = torch.load(args.connector_weights, map_location="cpu")
     connector.load_state_dict(connector_state_dict)
-    connector.to(device, dtype=torch.bfloat16¸w)
+    connector.to(device, dtype=torch.bfloat16)
 
     chart_llm = ChartLLM(vit_model=vit_model, llm_model=llm_model, connector=connector)
     chart_llm.eval()

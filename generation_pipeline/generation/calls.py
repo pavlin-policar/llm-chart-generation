@@ -130,6 +130,22 @@ class DataQuestionValidityResults(StrictModel):
     judgments: list[DataQuestionValidity]
 
 
+class QuestionValidityWithReason(QuestionValidity):
+    reason: str = Field(min_length=1)
+
+
+class QuestionValidityResultsWithReasons(StrictModel):
+    judgments: list[QuestionValidityWithReason]
+
+
+class DataQuestionValidityWithReason(DataQuestionValidity):
+    reason: str = Field(min_length=1)
+
+
+class DataQuestionValidityResultsWithReasons(StrictModel):
+    judgments: list[DataQuestionValidityWithReason]
+
+
 class QuestionTypes(
     RootModel[
         list[
@@ -1324,6 +1340,58 @@ def generate_graph_questions(
     raise ValueError(f"Expected {num} questions, received {last_count}")
 
 
+def repair_graph_questions(
+    llm,
+    png_path,
+    dataset_desc,
+    plot_desc,
+    graph_data,
+    rejected_questions,
+    retained_questions,
+    graph_df=None,
+    use_tools=False,
+    call_metadata=None,
+    final_llm=None,
+    *,
+    sanitized_dataset_desc,
+) -> list[dict]:
+    """Replace rejected batch candidates using both verifiers' feedback, once."""
+    prompt = (
+        "You are a chart QA generator repairing rejected question-answer pairs.\n"
+        f"Return EXACTLY {len(rejected_questions)} replacements in the same order as the rejected pairs. "
+        "Address every failure reported by either verifier, including false premises, incorrect "
+        "arithmetic, hidden quantities, and lack of required visual evidence. Recheck the answer "
+        "even if only one verifier rejected the original. Keep the original question's difficulty "
+        "and intent where feasible; replace an unanswerable question with a distinct, visually "
+        "answerable question rather than inventing evidence. Do not repeat or closely paraphrase "
+        "any retained question or another replacement.\n"
+        + QUESTION_EVIDENCE_INSTRUCTIONS
+        + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
+        + QUESTION_QUALITY_INSTRUCTIONS
+        + 'Return JSON only: {"questions": [{"question": "...", "answer": "...", "answer_basis": "image"}]}. '
+        "Each object must have only these three fields; answer_basis must be 'image' or 'both'."
+    )
+    with open(png_path, "rb") as file:
+        png_b64 = base64.b64encode(file.read()).decode("utf-8")
+    message = HumanMessage(content=[
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": f"SANITIZED DATASET DESCRIPTION (evaluator-visible):\n{sanitized_dataset_desc}"},
+        {"type": "text", "text": f"FULL DATASET DESCRIPTION (generator-only verification):\n{dataset_desc}"},
+        {"type": "text", "text": f"CHART DESCRIPTION (generator-only verification):\n{plot_desc}"},
+        {"type": "text", "text": f"graph_data (generator-only verification):\n{json.dumps(graph_data, ensure_ascii=False)}"},
+        {"type": "text", "text": f"REJECTED PAIRS WITH VERIFIER REASONS:\n{json.dumps(rejected_questions, ensure_ascii=False)}"},
+        {"type": "text", "text": f"RETAINED QUESTIONS (avoid duplicates):\n{json.dumps(retained_questions, ensure_ascii=False)}"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+    ])
+    response = invoke_structured_llm(
+        llm, [message], GraphQuestions, graph_df, use_tools, call_metadata,
+        enforce_schema_at_api=False, final_llm=final_llm,
+    )
+    if len(response.questions) != len(rejected_questions):
+        raise ValueError("Question repair count does not match rejected questions")
+    return [question.model_dump() for question in response.questions]
+
+
 def generate_graph_question_one(
     llm,
     png_path,
@@ -1414,7 +1482,7 @@ def generate_graph_question_one(
     return response.model_dump()
 
 
-def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None):
+def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None, *, return_reasons=False):
     """Check question-answer grounding using only the visible chart and domain context."""
     prompt = (
         "Judge each QUESTION and its proposed ANSWER in order. Use ONLY the chart image, "
@@ -1471,6 +1539,17 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "distinguished well enough to identify the answer.\n"
         'Return ONLY JSON: {"judgments": [{"vlisual_valid": true}, {"vlisual_valid": false}, ...]}.'
     )
+    if return_reasons:
+        prompt = prompt[:prompt.rindex("Return ONLY JSON:")] + (
+            "Thoroughly check each pair independently, including every premise and every answer claim. "
+            "For arithmetic or threshold rules, recompute the result from readable chart values; "
+            "do not accept an answer just because its conclusion sounds plausible. "
+            "Give a specific reason for BOTH passing and failing judgments: identify the visible "
+            "marks, labels, values, and supplied context that establish the answer, or explain "
+            "which evidence is missing, ambiguous, contradictory, or unnecessary to answer. "
+            "Do not treat the proposed answer as evidence. Return exactly one judgment per pair in order.\n"
+            'Return ONLY JSON: {"judgments": [{"vlisual_valid": true, "reason": "specific visual evidence"}]}.'
+        )
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
 
@@ -1484,17 +1563,19 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
     response = invoke_structured_llm(
         llm,
         [message],
-        QuestionValidityResults,
+        QuestionValidityResultsWithReasons if return_reasons else QuestionValidityResults,
         call_metadata=call_metadata,
         enforce_schema_at_api=False,
         final_llm=final_llm,
     )
     if len(response.judgments) != len(questions):
         raise ValueError("Question grounding judgment count does not match questions")
+    if return_reasons:
+        return [judgment.model_dump() for judgment in response.judgments]
     return [judgment.vlisual_valid for judgment in response.judgments]
 
 
-def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None):
+def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None, *, return_reasons=False):
     """Check data-dependent question-answer claims using the plotted dataframe."""
     if graph_df is None:
         raise ValueError("Question data validation requires the plotted dataframe")
@@ -1513,6 +1594,16 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         "Do not rewrite or remove questions. Return exactly one judgment per question in order.\n"
         'Return ONLY JSON: {"judgments": [{"data_valid": true}, {"data_valid": false}, ...]}.'
     )
+    if return_reasons:
+        prompt = prompt[:prompt.rindex("Return ONLY JSON:")] + (
+            "Thoroughly check each pair independently; do not infer that another question's "
+            "successful check also verifies this one. Recompute arithmetic and threshold rules, "
+            "including all intermediate values and comparisons. Give a specific reason for "
+            "BOTH passing and failing judgments. Cite the computed tool evidence, filters, "
+            "units, and comparison against the proposed answer, or explain the incorrect or "
+            "unverified claim. If there are no data-dependent claims, explicitly say so.\n"
+            'Return ONLY JSON: {"judgments": [{"data_valid": true, "reason": "specific computed evidence"}]}.'
+        )
     pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
     message = HumanMessage(content=[
         {"type": "text", "text": prompt},
@@ -1523,7 +1614,7 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
     response = invoke_structured_llm(
         llm,
         [message],
-        DataQuestionValidityResults,
+        DataQuestionValidityResultsWithReasons if return_reasons else DataQuestionValidityResults,
         df=graph_df,
         use_tools=True,
         call_metadata=call_metadata,
@@ -1532,6 +1623,8 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
     )
     if len(response.judgments) != len(questions):
         raise ValueError("Question data judgment count does not match questions")
+    if return_reasons:
+        return [judgment.model_dump() for judgment in response.judgments]
     return [judgment.data_valid for judgment in response.judgments]
 
 

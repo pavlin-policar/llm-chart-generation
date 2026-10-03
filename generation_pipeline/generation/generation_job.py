@@ -26,6 +26,7 @@ from calls import (
     judge_graph_questions,
     plan_call,
     recode_call,
+    repair_graph_questions,
     replace_vars_call,
     sanitize_dataset_description_call,
 )
@@ -438,6 +439,7 @@ def review_and_regenerate(
 
     skip_evaluation = False
     last_valid_code = code
+    last_accepted = None
 
     while True:
         previous_graph_file_path = graph_file_path
@@ -485,6 +487,15 @@ def review_and_regenerate(
                 if feedback_type in ("per_error", "per_error_exhaustive"):
                     image["errors"] = errors
                 images.append(image)
+                if feedback_type == "per_error_exhaustive" and accepted:
+                    # Keep the accepted image's code and plotting data together.
+                    last_accepted = (
+                        len(images) - 1,
+                        code,
+                        copy.deepcopy(graph_data),
+                        graph_df.copy(deep=True) if graph_df is not None else None,
+                        graph_file_path,
+                    )
 
                 feedback_resolved = (
                     not errors
@@ -637,6 +648,11 @@ def review_and_regenerate(
             skip_evaluation = True
             continue
 
+    selected_index = len(images) - 1
+    if last_accepted is not None:
+        selected_index, code, graph_data, graph_df, graph_file_path = last_accepted
+    # Preserve attempt order while identifying the final graph for consumers.
+    images[selected_index]["selected"] = True
     return code, graph_data, graph_df, graph_file_path, images
 
 
@@ -687,10 +703,11 @@ def build_metadata(
     llm_calls,
     graph_id=None,
 ):
+    final_image = next((image for image in images if image.get("selected")), images[-1])
     return {
         "id": graph_id or str(uuid.uuid4()),
         "prefix_id": image_id,
-        "accepted": images[-1]["accept"],
+        "accepted": final_image["accept"],
         "dataset": {
             "id": dataset_id,
             "description": dataset_sem["description"],
@@ -710,6 +727,70 @@ def build_metadata(
         "images": images,
         "llm_calls": llm_calls,
     }
+
+
+def verify_and_repair_batched_questions(
+    questions, llm, png_path, dataset_sem, description, graph_data, graph_df,
+    plot_code, stages, final_llm,
+):
+    """Verify groups of five; retain originals and make at most one repair pass."""
+    global CURRENT_STAGE
+
+    def verify(candidates, repair_round):
+        global CURRENT_STAGE
+        for start in range(0, len(candidates), 5):
+            batch = candidates[start:start + 5]
+            metadata = {"question_batch_start": start, "question_repair_round": repair_round}
+            if stages["questions"].get("parameters", {}).get("grounding_judge", True):
+                CURRENT_STAGE = "question_judge"
+                judgments = judge_graph_questions(
+                    llm, png_path, dataset_sem["sanitized_description"], batch,
+                    call_metadata={"stage_name": CURRENT_STAGE, **metadata},
+                    final_llm=final_llm, return_reasons=True,
+                )
+                for question, judgment in zip(batch, judgments):
+                    question["vlisual_valid"] = judgment["vlisual_valid"]
+                    question["visual_reason"] = judgment["reason"]
+
+            CURRENT_STAGE = "question_data_judge"
+            judgments = judge_graph_question_data(
+                llm, batch, graph_df, graph_data, plot_code,
+                call_metadata={"stage_name": CURRENT_STAGE, **metadata},
+                final_llm=final_llm, return_reasons=True,
+            )
+            for question, judgment in zip(batch, judgments):
+                question["data_valid"] = judgment["data_valid"]
+                question["data_reason"] = judgment["reason"]
+
+    verify(questions, repair_round=0)
+    rejected = [(index, question) for index, question in enumerate(questions)
+                if question.get("vlisual_valid") is False or question.get("data_valid") is False]
+    if not rejected:
+        return
+
+    retained = [question for question in questions
+                if question.get("vlisual_valid") is not False and question.get("data_valid") is not False]
+    CURRENT_STAGE = "question_repair"
+    try:
+        replacements = repair_graph_questions(
+            llm, png_path, dataset_sem["description"], description, graph_data,
+            [question for _, question in rejected], retained,
+            sanitized_dataset_desc=dataset_sem["sanitized_description"],
+            graph_df=graph_df, use_tools=stage_uses_tools(stages, "questions"),
+            call_metadata={"stage_name": CURRENT_STAGE, "question_repair_round": 1},
+            final_llm=final_llm,
+        )
+    except Exception as error:
+        # A failed repair must not discard the verified originals or their call log.
+        log_error(CURRENT_STAGE, error)
+        print(f"Question repair failed; keeping original candidates: {error}")
+        return
+
+    for (index, _), replacement in zip(rejected, replacements):
+        # One-based index into the saved questions list identifies the original.
+        replacement["replaces_question"] = index + 1
+    questions.extend(replacements)
+    verify(replacements, repair_round=1)
 
 
 def generate_graph(
@@ -861,11 +942,12 @@ def generate_graph(
     graph_data = regenerated_data if regenerated_data is not None else graph_data
     graph_df = regenerated_df if regenerated_df is not None else graph_df
 
-    final_img_path = os.path.join(dataset_folder, images[-1]["path"])
+    final_image = next((image for image in images if image.get("selected")), images[-1])
+    final_img_path = os.path.join(dataset_folder, final_image["path"])
 
     description = None
     questions = None
-    if images[-1]["accept"]:
+    if final_image["accept"]:
         CURRENT_STAGE = "description"
         print(f"Generating description... Time: {(time.perf_counter() - time_start):.04f}")
         description_llm = select_llm(
@@ -964,31 +1046,10 @@ def generate_graph(
             )
 
         if not one_by_one:
-            if stages["questions"].get("parameters", {}).get("grounding_judge", True):
-                CURRENT_STAGE = "question_judge"
-                judgments = judge_graph_questions(
-                    questions_llm,
-                    final_img_path,
-                    dataset_sem["sanitized_description"],
-                    questions,
-                    call_metadata={"stage_name": "question_judge"},
-                    final_llm=llm,
-                )
-                for question, valid in zip(questions, judgments):
-                    question["vlisual_valid"] = valid
-
-            CURRENT_STAGE = "question_data_judge"
-            data_judgments = judge_graph_question_data(
-                questions_llm,
-                questions,
-                graph_df,
-                graph_data,
-                code,
-                call_metadata={"stage_name": "question_data_judge"},
-                final_llm=llm,
+            verify_and_repair_batched_questions(
+                questions, questions_llm, final_img_path, dataset_sem, description,
+                graph_data, graph_df, code, stages, llm,
             )
-            for question, data_valid in zip(questions, data_judgments):
-                question["data_valid"] = data_valid
 
         CURRENT_STAGE = "question_labeling"
         label_questions(questions, stages, llm, llm_think)

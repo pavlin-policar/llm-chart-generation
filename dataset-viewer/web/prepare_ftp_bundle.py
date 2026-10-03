@@ -154,7 +154,8 @@ def final_image_path(record: dict[str, Any]) -> str | None:
     ]
     if not images:
         return None
-    return max(images, key=lambda img: image_iteration(img["path"]))["path"]
+    final = next((img for img in images if img.get("selected")), None)
+    return (final or max(images, key=lambda img: image_iteration(img["path"])))["path"]
 
 
 def quality(record: dict[str, Any], max_rounds: int = 3) -> str:
@@ -164,7 +165,8 @@ def quality(record: dict[str, Any], max_rounds: int = 3) -> str:
     ]
     if not images:
         return "good"
-    last = max(images, key=lambda img: image_iteration(img["path"]))
+    last = next((img for img in images if img.get("selected")), None)
+    last = last or max(images, key=lambda img: image_iteration(img["path"]))
     if image_iteration(last["path"]) < max_rounds:
         return "good"
     feedback = last.get("feedback") or ""
@@ -184,7 +186,9 @@ def chart_accepted(record: dict[str, Any]) -> bool:
     ]
     if not images:
         return False
-    return bool(max(images, key=lambda img: image_iteration(img["path"])).get("accept"))
+    final = next((img for img in images if img.get("selected")), None)
+    final = final or max(images, key=lambda img: image_iteration(img["path"]))
+    return bool(final.get("accept"))
 
 def read_error_counts(source_dir: Path) -> dict[str, int]:
     """Load generation-stage error counts from JSON or JSONL error logs."""

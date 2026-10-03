@@ -1260,7 +1260,9 @@ def render_detail(chart_row: dict, manifest: dict) -> None:
             labels = [f"it{i}" for i in range(len(iters))]
             iter_key = f"iter_{gid}"
             if iter_key not in st.session_state:
-                st.session_state[iter_key] = len(iters) - 1
+                st.session_state[iter_key] = next(
+                    (i for i, img in enumerate(iters) if img.get("selected")), len(iters) - 1
+                )
             chosen = st.radio(
                 "Iteration",
                 options=list(range(len(iters))),
