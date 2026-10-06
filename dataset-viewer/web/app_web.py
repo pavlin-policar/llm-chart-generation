@@ -1389,6 +1389,7 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
     for i, q in enumerate(questions, 1):
         qtext = q.get("question", "")
         qtype = q.get("type", "")
+        explanation = q.get("explanation", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
         validity = q.get("vlisual_valid", q.get("valid"))
@@ -1418,6 +1419,8 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
 
         with st.expander(f"Q{i}. [{qtype}] [{viability}] {qtext}", expanded=False):
             st.caption(f"Question viability: {viability}")
+            if explanation:
+                st.markdown(f"**Explanation:** {explanation}")
             st.markdown(f"**Ground truth:** {answer}")
             if basis:
 

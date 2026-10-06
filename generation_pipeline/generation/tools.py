@@ -108,12 +108,30 @@ class PandasCodeValidator(ast.NodeVisitor):
     def visit_Attribute(self, node):
         if node.attr.startswith("_"):
             raise ValueError("Private attributes are not allowed")
+        self._check_dataframe_write(node)
         self.generic_visit(node)
 
     def visit_Name(self, node):
         if node.id.startswith("_"):
             raise ValueError("Private names are not allowed")
+        self._check_dataframe_write(node)
         self.generic_visit(node)
+
+    def visit_Subscript(self, node):
+        self._check_dataframe_write(node)
+        self.generic_visit(node)
+
+    def visit_arg(self, node):
+        if node.arg == "df":
+            raise ValueError("The supplied df is read-only; do not replace or shadow it")
+        self.generic_visit(node)
+
+    def _check_dataframe_write(self, node):
+        root = node
+        while isinstance(root, (ast.Attribute, ast.Subscript)):
+            root = root.value
+        if isinstance(root, ast.Name) and root.id == "df" and isinstance(node.ctx, ast.Store):
+            raise ValueError("The supplied df is read-only; use a new variable for derived data")
 
     def visit_Call(self, node):
         if isinstance(node.func, ast.Name) and node.func.id == "print":
@@ -201,6 +219,9 @@ def create_dataframe_tools(df):
         calculations. Assign the value to return to a variable named `result`.
         The dataframe is a deep copy, and imports, private attributes, file I/O,
         plotting, and inplace mutation are blocked.
+        Do not replace, shadow, or modify the supplied `df`. Use a new variable
+        for derived data, such as `work = df.copy()`, and compute from the
+        supplied rows rather than reconstructing input data from typed values.
         Use `result`, not print(), to return values. Returns JSON with
         status="ok" and result, or status="error" with error_code, error_type,
         and message. An error means the computation did not succeed;
@@ -220,13 +241,24 @@ def create_dataframe_tools(df):
             return json.dumps(_error_outcome(error, "invalid_code"), ensure_ascii=False)
 
         try:
+            working_df = df.copy(deep=True)
+            # Index backing arrays can otherwise be shared with the original.
+            working_df.index = df.index.copy(deep=True)
+            working_df.columns = df.columns.copy(deep=True)
             namespace = {
                 "__builtins__": SAFE_BUILTINS,
-                "df": df.copy(deep=True),
+                "df": working_df,
                 "np": np,
                 "pd": pd,
             }
             exec(compile(tree, "<pandas-tool>", "exec"), namespace, namespace)
+            if (
+                namespace["df"] is not working_df
+                or not working_df.equals(df)
+                or working_df.index.names != df.index.names
+                or working_df.columns.names != df.columns.names
+            ):
+                raise ValueError("The supplied df was replaced or modified; use a copy in a new variable")
             result = json.loads(_serialize_result(namespace["result"]))
             return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
         except Exception as error:

@@ -106,6 +106,7 @@ class GraphDescription(StrictModel):
 
 class GraphQuestion(StrictModel):
     question: str = Field(min_length=1)
+    explanation: str = Field(min_length=1)
     answer: str = Field(min_length=1)
     answer_basis: Literal["image", "both"]
 
@@ -207,7 +208,7 @@ def _preserves_existing_content(original, formatted):
 def _format_structured_response(response, schema, formatter_llm, call_metadata, original_json):
     prompt = (
         "Format the RESPONSE below as JSON matching the required schema. "
-        "This is a formatting task only. Preserve every existing question, answer, "
+        "This is a formatting task only. Preserve every existing question, explanation, answer, "
         "fact, value, and list item exactly, including their order. "
         "Omit only fields forbidden by the schema. Do not answer the original "
         "task, paraphrase, recalculate, correct, add or remove list items, or "
@@ -1170,10 +1171,18 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
     "1. The evaluated model sees ONLY the IMAGE, SANITIZED DATASET DESCRIPTION, "
     "and current question. The answer must require chart evidence and be "
     "inferable from these inputs at reasonable visual precision. Ordinary "
-    "language, chart reading, arithmetic, and logical deductions are allowed; "
-    "do not require unstated outside facts.\n"
+    "language, chart reading, arithmetic, and logical deductions are allowed, "
+    "as are everyday meanings needed to interpret labels (e.g., scoring more "
+    "goals than an opponent means winning). This allowance does not include "
+    "specialist facts, dataset-specific category-code mappings, decision "
+    "thresholds, causal mechanisms, scientific explanations, or external "
+    "empirical facts. Apart from the allowed ordinary understanding, do not "
+    "require unstated outside facts.\n"
     "2. Supply any necessary definitions, background facts, assumptions, "
-    "thresholds, or reasoning rules explicitly in the question. Label invented "
+    "thresholds, or reasoning rules explicitly in the question ONLY when they "
+    "cannot be inferred from the image, sanitized dataset description, or "
+    "allowed ordinary understanding. Supply only the minimum missing context; "
+    "do not repeat information already available from those sources. Label invented "
     "assumptions or rules as task definitions, not established scientific facts. Example: "
     "'For this task, a group meets the treatment goal if its pulse decreases "
     "and its temperature does not increase from before to after treatment. "
@@ -1213,8 +1222,11 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
 
 QUESTION_TOOL_VERIFICATION_INSTRUCTIONS = (
     "MANDATORY TOOL VERIFICATION:\n"
-    "- Before final output, validate EVERY data-dependent question and answer with run_pandas "
+    "- Before final output, validate EVERY data-dependent question, explanation, and answer with run_pandas "
     "computations on df. Batch checks are allowed; label results by question number.\n"
+    "- The supplied df is read-only. Never replace, shadow, or modify it, or "
+    "reconstruct input data from typed values. Use a new variable for derived "
+    "data and compute evidence from the supplied rows.\n"
     "- Match plotted filters, transformations, and aggregations. Check all "
     "data-dependent premises and answer claims, including comparisons and 'most' claims. "
     "Check visual-only facts against the image.\n"
@@ -1233,6 +1245,24 @@ QUESTION_QUALITY_INSTRUCTIONS = (
     "must give that result, not instructions. Avoid vague requests like 'analyze' or "
     "'explain how', general dataset questions, and generic method questions "
     "such as 'What does PCA do?'\n"
+    "- Put a brief, factual justification in 'explanation': identify the "
+    "chart evidence and any calculation or contextual meaning supporting the "
+    "result. Every explanation claim must obey the same evidence and "
+    "verification rules as the answer. Put only the requested final result "
+    "in 'answer', including units or essential qualifications; keep the "
+    "justification and intermediate calculations out of 'answer'. Return "
+    "'explanation' before 'answer'.\n"
+    "- Write concise, natural questions asking for the result. Leave the "
+    "solution method to the evaluated model: when the necessary calculations "
+    "or relevant cells, groups, or marks can be inferred from what is asked, "
+    "do not spell them out or provide step-by-step instructions. Do not supply "
+    "observed chart values or intermediate results that the model should read "
+    "or derive. Still specify the requested quantity, comparison groups, scope, "
+    "units, precision, and genuinely task-specific criteria when needed to "
+    "make the question unambiguous. A formula may be supplied when essential "
+    "to define a nonstandard metric, not to explain ordinary arithmetic. "
+    "Before returning each question, remove wording unnecessary to understand "
+    "what result is requested.\n"
     "- Vary visual elements, relationships, and reasoning patterns; do not "
     "repeat or closely paraphrase questions. Cover both chart mechanics "
     "(axes, legends, encodings, layout) and dataset semantics across the "
@@ -1240,7 +1270,8 @@ QUESTION_QUALITY_INSTRUCTIONS = (
     "This coverage is not required within every question.\n"
     "- Domain questions use this dataset's real-world entities and measurements "
     "and connect a visible comparison or pattern to meanings supplied in the "
-    "sanitized description or question. Do not invent domain explanations. "
+    "image, sanitized description or question, or to allowed everyday meanings. "
+    "Do not invent domain explanations. "
     "Example only for handwriting data: 'Given that point_1_y is the stroke's starting "
     "height, which digit class tends to begin highest?' Use the actual "
     "dataset's terms, rather than generic series or axes.\n"
@@ -1291,10 +1322,10 @@ def generate_graph_questions(
         + QUESTION_EVIDENCE_INSTRUCTIONS
         + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
-        + "FINAL CHECK: verify answers, visual answerability, diversity, difficulty/domain coverage, and the exact question count.\n\n"
+        + "FINAL CHECK: verify explanations and answers, visual answerability, diversity, difficulty/domain coverage, and the exact question count.\n\n"
         "Output format (STRICT):\n"
-        'Return JSON only in this shape: {"questions": [{"question": "<question text>", "answer": "<answer text>", "answer_basis": "image"}]}.\n'
-        f"Replace placeholders and include exactly {num} objects, each with only these three string fields. answer_basis must be 'image' or 'both'.\n"
+        'Return JSON only in this shape: {"questions": [{"question": "<question text>", "explanation": "<brief factual justification>", "answer": "<final answer>", "answer_basis": "image"}]}.\n'
+        f"Replace placeholders and include exactly {num} objects, each with only these four string fields in the shown order. answer_basis must be 'image' or 'both'.\n"
     )
 
     with open(png_path, "rb") as f:
@@ -1368,8 +1399,8 @@ def repair_graph_questions(
         + QUESTION_EVIDENCE_INSTRUCTIONS
         + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
-        + 'Return JSON only: {"questions": [{"question": "...", "answer": "...", "answer_basis": "image"}]}. '
-        "Each object must have only these three fields; answer_basis must be 'image' or 'both'."
+        + 'Return JSON only: {"questions": [{"question": "...", "explanation": "...", "answer": "...", "answer_basis": "image"}]}. '
+        "Each object must have only these four fields in the shown order; answer_basis must be 'image' or 'both'."
     )
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
@@ -1438,11 +1469,11 @@ def generate_graph_question_one(
     )
 
     prompt += (
-        "\nFINAL CHECK: verify the answer, visual answerability, assigned difficulty, "
+        "\nFINAL CHECK: verify the explanation and answer, visual answerability, assigned difficulty, "
         "and strict distinctness from every previous question.\n\n"
         "Output format (STRICT):\n"
-        'Return JSON only in this shape: {"question": "<question text>", "answer": "<answer text>", "answer_basis": "image"}.\n'
-        "Replace placeholders; use exactly these three string fields, without a questions array. answer_basis must be 'image' or 'both'.\n"
+        'Return JSON only in this shape: {"question": "<question text>", "explanation": "<brief factual justification>", "answer": "<final answer>", "answer_basis": "image"}.\n'
+        "Replace placeholders; use exactly these four string fields in the shown order, without a questions array. answer_basis must be 'image' or 'both'.\n"
     )
 
     with open(png_path, "rb") as file:
@@ -1485,26 +1516,43 @@ def generate_graph_question_one(
 def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None, *, return_reasons=False):
     """Check question-answer grounding using only the visible chart and domain context."""
     prompt = (
-        "Judge each QUESTION and its proposed ANSWER in order. Use ONLY the chart image, "
+        "Judge each QUESTION, its EXPLANATION (when supplied), and final ANSWER in order. "
+        "Check every explanation claim as well as the answer; a correct final "
+        "answer does not excuse an incorrect, unsupported, or contradictory "
+        "explanation. Set vlisual_valid to false if either fails these checks. "
+        "Use ONLY the chart image, "
         "SANITIZED DATASET DESCRIPTION, and context explicitly supplied in the question; no rich descriptions, plotting code, "
-        "hidden data, or outside knowledge.\n"
+        "hidden data, or outside specialist or empirical knowledge. The ordinary "
+        "understanding allowed below may be used to interpret these inputs.\n"
         "Set vlisual_valid to true only if the proposed answer is correct and checkable "
         "from visible chart evidence alone or together with domain facts explicitly "
-        "stated in the sanitized dataset description or question. Simple arithmetic on visible values is allowed.\n"
+        "stated in, or logically deducible from, the allowed inputs using the "
+        "permissions below. Simple arithmetic on visible values is allowed.\n"
         "STRICT OUTSIDE-KNOWLEDGE CHECK:\n"
         "For each pair, identify every factual premise needed to understand the "
         "question and justify the proposed answer. All domain facts, variable "
         "meanings, category-code mappings, thresholds, and interpretive rules "
         "must be explicitly supplied by the image, sanitized description, or "
-        "question. Definitions, background facts, assumptions, and reasoning "
+        "question, or logically deducible from them, except for the allowed "
+        "everyday meanings below. Definitions, background facts, assumptions, and reasoning "
         "rules explicitly supplied in the question are allowed when the answer "
         "still requires reading distinguishable chart evidence. "
         "Ordinary language comprehension, reading chart encodings, arithmetic, "
-        "and logical deductions from the supplied evidence are allowed.\n"
-        "Set vlisual_valid to false if any necessary factual premise comes from outside "
-        "knowledge, even if you know it, regard it as common knowledge, or "
-        "believe the proposed answer is factually correct. Do not use your "
-        "training knowledge to fill missing context. Do not assume typical "
+        "and logical deductions from the supplied evidence are allowed, as are "
+        "everyday meanings needed to interpret labels (e.g., scoring more goals "
+        "than an opponent means winning). This allowance does not include "
+        "specialist facts, dataset-specific category-code mappings, decision "
+        "thresholds, causal mechanisms, scientific explanations, or external "
+        "empirical facts.\n"
+        "Do not require a question to repeat information inferable from the "
+        "allowed inputs or ordinary understanding, or to state calculation "
+        "steps or which cells or marks to combine when the requested result "
+        "determines them. Necessary missing definitions and genuinely "
+        "task-specific criteria must still be supplied.\n"
+        "Set vlisual_valid to false if any necessary factual premise beyond "
+        "these allowances comes from outside knowledge, even if you know it "
+        "or believe the proposed answer is factually correct. Do not use your "
+        "training knowledge to fill missing specialist or dataset-specific context. Do not assume typical "
         "values, normal ranges, diagnostic criteria, causal mechanisms, "
         "treatment recommendations, or scientific explanations.\n"
         "Context explicitly provided in the question is allowed input, but "
@@ -1530,7 +1578,8 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "whether every digit can be read. For instance, reference 9.543 is valid "
         "for a bar readable as about 9.5. Respect units and axis multipliers: "
         "9543 is about 9.5 thousand, not 9.5 in unscaled units.\n"
-        "Set vlisual_valid to false if the answer needs unseen values, unstated domain facts, "
+        "Set vlisual_valid to false if the answer needs unseen values, unsupported "
+        "domain facts beyond the allowed everyday meanings, "
         "or statistical/visualization theory not supplied in the allowed context, or if "
         "the question does not require visible chart evidence, including questions "
         "answerable from the sanitized context or question wording alone. An approximate value "
@@ -1553,7 +1602,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
 
-    pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
+    pairs = [{"question": q["question"], "explanation": q.get("explanation", ""), "answer": q["answer"]} for q in questions]
     message = HumanMessage(content=[
         {"type": "text", "text": prompt},
         {"type": "text", "text": f"SANITIZED DATASET DESCRIPTION:\n{dataset_desc}"},
@@ -1580,10 +1629,19 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
     if graph_df is None:
         raise ValueError("Question data validation requires the plotted dataframe")
     prompt = (
-        "Validate every QUESTION and proposed ANSWER in order against the plotted data. "
-        "Use run_pandas on df to verify EVERY data-dependent premise and answer claim. "
+        "Validate every QUESTION, its EXPLANATION (when supplied), and final ANSWER "
+        "in order against the plotted data. Use run_pandas on df to verify EVERY "
+        "data-dependent premise and claim in the question, explanation, and answer. "
+        "A correct final answer does not excuse an incorrect, unsupported, or "
+        "contradictory explanation; set data_valid=false if any data-dependent "
+        "claim in either field fails verification. "
         "Match plotted filters, transformations, aggregations, bins, units, and axis scaling. "
         "Check comparisons and denominators; 'most' means more than half. Allow stated approximations.\n"
+        "Retrieving values does not verify a comparison or conclusion. "
+        "Compute the asserted relationship and check whether it supports the exact claim.\n"
+        "The supplied df is read-only. Never replace, shadow, or modify it, or "
+        "reconstruct input data from typed values. Use a new variable for derived "
+        "data and compute evidence from the supplied rows.\n"
         "In every run_pandas call, assign computed evidence to the Python variable `result`. "
         "Do not use print(). Batch checks are allowed; label results by question number. "
         "Only status='ok' computations on df count as evidence; hardcoded answers or "
@@ -1604,7 +1662,7 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
             "unverified claim. If there are no data-dependent claims, explicitly say so.\n"
             'Return ONLY JSON: {"judgments": [{"data_valid": true, "reason": "specific computed evidence"}]}.'
         )
-    pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
+    pairs = [{"question": q["question"], "explanation": q.get("explanation", ""), "answer": q["answer"]} for q in questions]
     message = HumanMessage(content=[
         {"type": "text", "text": prompt},
         {"type": "text", "text": f"graph_data:\n{json.dumps(graph_data, ensure_ascii=False)}"},
