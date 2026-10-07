@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from call_collector import LLMCallCollector
 from calls import (
+    correct_graph_questions,
     describe_graph_png,
     determine_dataset_usability_call,
     format_dataset_description_call,
@@ -26,7 +27,6 @@ from calls import (
     judge_graph_questions,
     plan_call,
     recode_call,
-    repair_graph_questions,
     replace_vars_call,
     sanitize_dataset_description_call,
 )
@@ -726,40 +726,49 @@ def build_metadata(
     }
 
 
-def verify_and_repair_batched_questions(
-    questions, llm, png_path, dataset_sem, description, graph_data, graph_df,
-    plot_code, stages, final_llm,
+def verify_batched_questions(
+    questions, llm, png_path, dataset_sem, graph_data, graph_df,
+    plot_code, stages, final_llm, *, correction_round=0,
 ):
-    """Verify groups of five; retain originals and make at most one repair pass."""
+    """Verify candidates once in groups of five and retain their judgments."""
     global CURRENT_STAGE
 
-    def verify(candidates, repair_round):
-        global CURRENT_STAGE
-        for start in range(0, len(candidates), 5):
-            batch = candidates[start:start + 5]
-            metadata = {"question_batch_start": start, "question_repair_round": repair_round}
-            if stages["questions"].get("parameters", {}).get("grounding_judge", True):
-                CURRENT_STAGE = "question_judge"
-                judgments = judge_graph_questions(
-                    llm, png_path, dataset_sem["sanitized_description"], batch,
-                    call_metadata={"stage_name": CURRENT_STAGE, **metadata},
-                    final_llm=final_llm, return_reasons=True,
-                )
-                for question, judgment in zip(batch, judgments):
-                    question["vlisual_valid"] = judgment["vlisual_valid"]
-                    question["visual_reason"] = judgment["reason"]
-
-            CURRENT_STAGE = "question_data_judge"
-            judgments = judge_graph_question_data(
-                llm, batch, graph_df, graph_data, plot_code,
+    for start in range(0, len(questions), 5):
+        batch = questions[start:start + 5]
+        metadata = {"question_batch_start": start, "question_correction_round": correction_round}
+        if stages["questions"].get("parameters", {}).get("grounding_judge", True):
+            CURRENT_STAGE = "question_judge"
+            judgments = judge_graph_questions(
+                llm, png_path, dataset_sem["sanitized_description"], batch,
                 call_metadata={"stage_name": CURRENT_STAGE, **metadata},
                 final_llm=final_llm, return_reasons=True,
             )
             for question, judgment in zip(batch, judgments):
-                question["data_valid"] = judgment["data_valid"]
-                question["data_reason"] = judgment["reason"]
+                question["vlisual_valid"] = judgment["vlisual_valid"]
+                question["visual_reason"] = judgment["reason"]
 
-    verify(questions, repair_round=0)
+        CURRENT_STAGE = "question_data_judge"
+        judgments = judge_graph_question_data(
+            llm, batch, graph_df, graph_data, plot_code,
+            call_metadata={"stage_name": CURRENT_STAGE, **metadata},
+            final_llm=final_llm, return_reasons=True,
+        )
+        for question, judgment in zip(batch, judgments):
+            question["data_valid"] = judgment["data_valid"]
+            question["data_reason"] = judgment["reason"]
+
+
+def verify_and_correct_batched_questions(
+    questions, llm, png_path, dataset_sem, description, graph_data, graph_df,
+    plot_code, stages, final_llm,
+):
+    """Validate, correct all failures in one batch, then validate corrections once."""
+    global CURRENT_STAGE
+
+    verify_batched_questions(
+        questions, llm, png_path, dataset_sem, graph_data, graph_df,
+        plot_code, stages, final_llm,
+    )
     rejected = [(index, question) for index, question in enumerate(questions)
                 if question.get("vlisual_valid") is False or question.get("data_valid") is False]
     if not rejected:
@@ -767,27 +776,31 @@ def verify_and_repair_batched_questions(
 
     retained = [question for question in questions
                 if question.get("vlisual_valid") is not False and question.get("data_valid") is not False]
-    CURRENT_STAGE = "question_repair"
+    CURRENT_STAGE = "question_correction"
     try:
-        replacements = repair_graph_questions(
+        corrected = correct_graph_questions(
             llm, png_path, dataset_sem["description"], description, graph_data,
-            [question for _, question in rejected], retained,
-            sanitized_dataset_desc=dataset_sem["sanitized_description"],
+            plot_code, [question for _, question in rejected], retained,
             graph_df=graph_df, use_tools=stage_uses_tools(stages, "questions"),
-            call_metadata={"stage_name": CURRENT_STAGE, "question_repair_round": 1},
+            call_metadata={"stage_name": CURRENT_STAGE, "question_correction_round": 1},
             final_llm=final_llm,
+            sanitized_dataset_desc=dataset_sem["sanitized_description"],
         )
     except Exception as error:
-        # A failed repair must not discard the verified originals or their call log.
         log_error(CURRENT_STAGE, error)
-        print(f"Question repair failed; keeping original candidates: {error}")
+        print(f"Question correction failed; keeping original candidates: {error}")
         return
 
-    for (index, _), replacement in zip(rejected, replacements):
-        # One-based index into the saved questions list identifies the original.
-        replacement["replaces_question"] = index + 1
-    questions.extend(replacements)
-    verify(replacements, repair_round=1)
+    for (index, original), correction in zip(rejected, corrected):
+        # Keep originals and link each correction to its one-based saved index.
+        correction["replaces_question"] = index + 1
+        if "difficulty" in original:
+            correction["difficulty"] = original["difficulty"]
+    questions.extend(corrected)
+    verify_batched_questions(
+        corrected, llm, png_path, dataset_sem, graph_data, graph_df,
+        plot_code, stages, final_llm, correction_round=1,
+    )
 
 
 def generate_graph(
@@ -1043,7 +1056,7 @@ def generate_graph(
             )
 
         if not one_by_one:
-            verify_and_repair_batched_questions(
+            verify_and_correct_batched_questions(
                 questions, questions_llm, final_img_path, dataset_sem, description,
                 graph_data, graph_df, code, stages, llm,
             )

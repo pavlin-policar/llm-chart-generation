@@ -1,0 +1,43 @@
+{
+  "seed": 20261007,
+  "design": "Simple random sample of 30 accepted charts with passing questions; simple random sample of up to 6 passing questions per sampled chart.",
+  "counts": {
+    "charts_total": 341,
+    "charts_accepted": 337,
+    "questions_candidates": 7892,
+    "flags_(True, True)": 6455,
+    "flags_(True, False)": 526,
+    "flags_(False, True)": 768,
+    "questions_passed": 6455,
+    "flags_(False, False)": 143,
+    "charts_rejected": 4
+  },
+  "passed_question_types": {
+    "metadata": 1323,
+    "comparison": 928,
+    "trends": 332,
+    "value extraction": 1423,
+    "reasoning": 1618,
+    "null": 764,
+    "unknown": 67
+  },
+  "passed_questions_per_chart": {
+    "18": 14,
+    "20": 237,
+    "17": 10,
+    "19": 52,
+    "16": 5,
+    "13": 3,
+    "10": 1,
+    "12": 1,
+    "15": 3,
+    "14": 4,
+    "6": 1,
+    "11": 3,
+    "7": 1,
+    "9": 1,
+    "8": 1
+  },
+  "sample_charts": 30,
+  "sample_questions": 180
+}

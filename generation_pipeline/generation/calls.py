@@ -1200,6 +1200,36 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
     "be asked about unless the requested information is visually inferable. "
     "Tool access does not make it visible. Do not base "
     "comparisons or decisions on visually indistinguishable differences.\n\n"
+    "STRICT NO-LEAKAGE RULES FOR QUESTION TEXT:\n"
+    "- The reader MUST obtain the necessary plotted observations from the IMAGE. "
+    "NEVER supply chart facts as helpful context when the reader can read or "
+    "reasonably approximate them from the image. This includes values, counts, "
+    "ranges, quartiles, colors, legend mappings, rankings, trends, and comparisons. "
+    "A value need not be printed or exactly readable: if the reader can estimate "
+    "it from marks, axes, ticks, or colors, leave that estimate to the reader. "
+    "Do not insert exact hidden values to save the reader from approximating.\n"
+    "- NEVER reveal the requested answer in the question, directly or indirectly. "
+    "Do not name the winning category, state the requested direction or yes/no "
+    "conclusion, identify the answer through a leading description, or give "
+    "intermediate results that reduce the task to arithmetic on supplied numbers. "
+    "Keep observed values, comparisons, calculations, and conclusions in the "
+    "explanation and answer, not in the question.\n"
+    "- You may name the groups, variables, panels, or coordinate ranges needed "
+    "to locate what is being asked about, and provide genuinely missing domain "
+    "definitions or independently defined task rules. Such context must not "
+    "state the plotted observation or requested result. Do not disguise observed "
+    "chart values as assumptions, hints, examples, or task definitions.\n"
+    "- BAD: 'Group A is about 20 and Group B about 12. How much larger is A?' "
+    "GOOD: 'Approximately how much larger is Group A's value than Group B's?' "
+    "The reader must estimate both values from the chart. "
+    "BAD: 'Group A has the tallest bar. Which group has the highest value?' "
+    "GOOD: 'Which group has the highest plotted value?'\n"
+    "- MANDATORY SELF-CHECK: hide the image and read only the question and "
+    "sanitized description. If the requested answer can still be obtained, "
+    "or the question already supplies the chart observations needed to solve "
+    "it, rewrite it. After removing those clues, confirm that the remaining "
+    "question still has a clear answer supported by distinguishable image "
+    "evidence, allowing reasonable visual approximations.\n\n"
     "NUMERIC REFERENCE ANSWERS:\n"
     "- An identifiable bar, point, or other plotted quantity may be asked "
     "about even when only an estimate is readable. Ask for an approximate "
@@ -1322,7 +1352,10 @@ def generate_graph_questions(
         + QUESTION_EVIDENCE_INSTRUCTIONS
         + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
-        + "FINAL CHECK: verify explanations and answers, visual answerability, diversity, difficulty/domain coverage, and the exact question count.\n\n"
+        + "FINAL CHECK: verify explanations and answers, visual answerability, diversity, difficulty/domain coverage, and the exact question count. "
+        "For EVERY question, repeat the no-image self-check: the image must be necessary, "
+        "and the question must not supply readable or approximately readable chart facts, "
+        "intermediate results, or the requested answer.\n\n"
         "Output format (STRICT):\n"
         'Return JSON only in this shape: {"questions": [{"question": "<question text>", "explanation": "<brief factual justification>", "answer": "<final answer>", "answer_basis": "image"}]}.\n'
         f"Replace placeholders and include exactly {num} objects, each with only these four string fields in the shown order. answer_basis must be 'image' or 'both'.\n"
@@ -1371,12 +1404,13 @@ def generate_graph_questions(
     raise ValueError(f"Expected {num} questions, received {last_count}")
 
 
-def repair_graph_questions(
+def correct_graph_questions(
     llm,
     png_path,
     dataset_desc,
     plot_desc,
     graph_data,
+    plot_code,
     rejected_questions,
     retained_questions,
     graph_df=None,
@@ -1386,21 +1420,35 @@ def repair_graph_questions(
     *,
     sanitized_dataset_desc,
 ) -> list[dict]:
-    """Replace rejected batch candidates using both verifiers' feedback, once."""
+    """Correct all rejected batch candidates together using both judges' feedback."""
+    if not rejected_questions:
+        return []
+
     prompt = (
-        "You are a chart QA generator repairing rejected question-answer pairs.\n"
-        f"Return EXACTLY {len(rejected_questions)} replacements in the same order as the rejected pairs. "
-        "Address every failure reported by either verifier, including false premises, incorrect "
-        "arithmetic, hidden quantities, and lack of required visual evidence. Recheck the answer "
-        "even if only one verifier rejected the original. Keep the original question's difficulty "
-        "and intent where feasible; replace an unanswerable question with a distinct, visually "
-        "answerable question rather than inventing evidence. Do not repeat or closely paraphrase "
-        "any retained question or another replacement.\n"
+        "You are a chart QA generator correcting rejected question-answer pairs.\n"
+        f"Return EXACTLY {len(rejected_questions)} corrected pairs in the original order. "
+        "Use BOTH validators' validity flags and feedback in each rejected pair: "
+        "visual_reason checks image grounding and data_reason checks plotted-data correctness. "
+        "Resolve every reported failure, including false premises, wrong answers, "
+        "incorrect explanations, arithmetic, hidden quantities, outside knowledge, "
+        "and answer leakage. A passing judgment from one validator does not override "
+        "the other validator's failure. Verify all claims rather than treating "
+        "feedback or the original answer as ground truth.\n"
+        "Preserve the question's intent and difficulty where visually supported. "
+        "Correct the explanation even if the final answer was already correct. "
+        "If the original task is unanswerable, rewrite it as a distinct, visually "
+        "answerable task without inventing evidence. Do not repeat or closely "
+        "paraphrase a retained question or another corrected pair.\n"
         + QUESTION_EVIDENCE_INSTRUCTIONS
         + (QUESTION_TOOL_VERIFICATION_INSTRUCTIONS if use_tools else "")
         + QUESTION_QUALITY_INSTRUCTIONS
-        + 'Return JSON only: {"questions": [{"question": "...", "explanation": "...", "answer": "...", "answer_basis": "image"}]}. '
-        "Each object must have only these four fields in the shown order; answer_basis must be 'image' or 'both'."
+        + "FINAL CHECK: every corrected question must require the image, reveal "
+        "neither readable/approximately readable observations nor its answer, "
+        "and have a verified explanation and answer. This is the only correction "
+        "round; return one complete batch without adding extra questions.\n"
+        'Return JSON only: {"questions": [{"question": "...", "explanation": "...", "answer": "...", "answer_basis": "image"}]}. '
+        "Each object must contain only these four string fields in this order; "
+        "answer_basis must be 'image' or 'both'."
     )
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
@@ -1410,7 +1458,8 @@ def repair_graph_questions(
         {"type": "text", "text": f"FULL DATASET DESCRIPTION (generator-only verification):\n{dataset_desc}"},
         {"type": "text", "text": f"CHART DESCRIPTION (generator-only verification):\n{plot_desc}"},
         {"type": "text", "text": f"graph_data (generator-only verification):\n{json.dumps(graph_data, ensure_ascii=False)}"},
-        {"type": "text", "text": f"REJECTED PAIRS WITH VERIFIER REASONS:\n{json.dumps(rejected_questions, ensure_ascii=False)}"},
+        {"type": "text", "text": f"PLOT CODE (generator-only verification):\n{plot_code}"},
+        {"type": "text", "text": f"REJECTED PAIRS WITH BOTH VALIDATORS' FEEDBACK:\n{json.dumps(rejected_questions, ensure_ascii=False)}"},
         {"type": "text", "text": f"RETAINED QUESTIONS (avoid duplicates):\n{json.dumps(retained_questions, ensure_ascii=False)}"},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
     ])
@@ -1419,7 +1468,7 @@ def repair_graph_questions(
         enforce_schema_at_api=False, final_llm=final_llm,
     )
     if len(response.questions) != len(rejected_questions):
-        raise ValueError("Question repair count does not match rejected questions")
+        raise ValueError("Question correction count does not match rejected questions")
     return [question.model_dump() for question in response.questions]
 
 
@@ -1470,7 +1519,9 @@ def generate_graph_question_one(
 
     prompt += (
         "\nFINAL CHECK: verify the explanation and answer, visual answerability, assigned difficulty, "
-        "and strict distinctness from every previous question.\n\n"
+        "and strict distinctness from every previous question. Repeat the no-image self-check: "
+        "the image must be necessary, and the question must not supply readable or "
+        "approximately readable chart facts, intermediate results, or the requested answer.\n\n"
         "Output format (STRICT):\n"
         'Return JSON only in this shape: {"question": "<question text>", "explanation": "<brief factual justification>", "answer": "<final answer>", "answer_basis": "image"}.\n'
         "Replace placeholders; use exactly these four string fields in the shown order, without a questions array. answer_basis must be 'image' or 'both'.\n"
