@@ -733,11 +733,16 @@ def verify_batched_questions(
     """Verify candidates once in groups of five and retain their judgments."""
     global CURRENT_STAGE
 
+    review_phase = "Initial question review" if correction_round == 0 else "Corrected question review"
+    batch_count = (len(questions) + 4) // 5
     for start in range(0, len(questions), 5):
         batch = questions[start:start + 5]
+        batch_label = f"{review_phase}, batch {start // 5 + 1}/{batch_count} ({len(batch)} questions)"
         metadata = {"question_batch_start": start, "question_correction_round": correction_round}
         if stages["questions"].get("parameters", {}).get("grounding_judge", True):
             CURRENT_STAGE = "question_judge"
+            validator_start = time.perf_counter()
+            print(f"{batch_label}: running visual validator...", flush=True)
             judgments = judge_graph_questions(
                 llm, png_path, dataset_sem["sanitized_description"], batch,
                 call_metadata={"stage_name": CURRENT_STAGE, **metadata},
@@ -746,8 +751,17 @@ def verify_batched_questions(
             for question, judgment in zip(batch, judgments):
                 question["vlisual_valid"] = judgment["vlisual_valid"]
                 question["visual_reason"] = judgment["reason"]
+            rejected_count = sum(not judgment["vlisual_valid"] for judgment in judgments)
+            print(
+                f"{batch_label}: visual validator finished. "
+                f"Elapsed: {time.perf_counter() - validator_start:.04f}s; "
+                f"rejected {rejected_count}/{len(batch)}.",
+                flush=True,
+            )
 
         CURRENT_STAGE = "question_data_judge"
+        validator_start = time.perf_counter()
+        print(f"{batch_label}: running data validator...", flush=True)
         judgments = judge_graph_question_data(
             llm, batch, graph_df, graph_data, plot_code,
             call_metadata={"stage_name": CURRENT_STAGE, **metadata},
@@ -756,6 +770,13 @@ def verify_batched_questions(
         for question, judgment in zip(batch, judgments):
             question["data_valid"] = judgment["data_valid"]
             question["data_reason"] = judgment["reason"]
+        rejected_count = sum(not judgment["data_valid"] for judgment in judgments)
+        print(
+            f"{batch_label}: data validator finished. "
+            f"Elapsed: {time.perf_counter() - validator_start:.04f}s; "
+            f"rejected {rejected_count}/{len(batch)}.",
+            flush=True,
+        )
 
 
 def verify_and_correct_batched_questions(
@@ -765,18 +786,28 @@ def verify_and_correct_batched_questions(
     """Validate, correct all failures in one batch, then validate corrections once."""
     global CURRENT_STAGE
 
+    review_start = time.perf_counter()
+    print(f"Reviewing {len(questions)} initial questions...", flush=True)
     verify_batched_questions(
         questions, llm, png_path, dataset_sem, graph_data, graph_df,
         plot_code, stages, final_llm,
     )
     rejected = [(index, question) for index, question in enumerate(questions)
                 if question.get("vlisual_valid") is False or question.get("data_valid") is False]
+    print(
+        f"Initial question review finished. Elapsed: {time.perf_counter() - review_start:.04f}s; "
+        f"rejected {len(rejected)}/{len(questions)}.",
+        flush=True,
+    )
     if not rejected:
+        print("Skipping question correction: all initial questions passed.", flush=True)
         return
 
     retained = [question for question in questions
                 if question.get("vlisual_valid") is not False and question.get("data_valid") is not False]
     CURRENT_STAGE = "question_correction"
+    correction_start = time.perf_counter()
+    print(f"Correcting {len(rejected)} rejected questions together (round 1/1)...", flush=True)
     try:
         corrected = correct_graph_questions(
             llm, png_path, dataset_sem["description"], description, graph_data,
@@ -788,8 +819,17 @@ def verify_and_correct_batched_questions(
         )
     except Exception as error:
         log_error(CURRENT_STAGE, error)
-        print(f"Question correction failed; keeping original candidates: {error}")
+        print(
+            f"Question correction failed after {time.perf_counter() - correction_start:.04f}s; "
+            f"keeping original candidates: {error}",
+            flush=True,
+        )
         return
+    print(
+        f"Question correction finished ({len(corrected)} questions). "
+        f"Elapsed: {time.perf_counter() - correction_start:.04f}s.",
+        flush=True,
+    )
 
     for (index, original), correction in zip(rejected, corrected):
         # Keep originals and link each correction to its one-based saved index.
@@ -797,9 +837,20 @@ def verify_and_correct_batched_questions(
         if "difficulty" in original:
             correction["difficulty"] = original["difficulty"]
     questions.extend(corrected)
+    review_start = time.perf_counter()
+    print(f"Reviewing {len(corrected)} corrected questions...", flush=True)
     verify_batched_questions(
         corrected, llm, png_path, dataset_sem, graph_data, graph_df,
         plot_code, stages, final_llm, correction_round=1,
+    )
+    rejected_count = sum(
+        question.get("vlisual_valid") is False or question.get("data_valid") is False
+        for question in corrected
+    )
+    print(
+        f"Corrected question review finished. Elapsed: {time.perf_counter() - review_start:.04f}s; "
+        f"rejected {rejected_count}/{len(corrected)}. Stopping after one correction round.",
+        flush=True,
     )
 
 
@@ -980,7 +1031,7 @@ def generate_graph(
         )
 
         CURRENT_STAGE = "questions"
-        print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}")
+        print(f"Generating questions... Time: {(time.perf_counter() - time_start):.04f}", flush=True)
         questions_llm = select_llm(stages, "questions", llm, llm_think)
         num_questions = stage_parameter(stages, "questions", "num_questions")
         one_by_one = stages["questions"].get("parameters", {}).get("one", False)
@@ -1041,6 +1092,7 @@ def generate_graph(
                     valid_questions.append(quest)
 
         else:
+            qa_generation_start = time.perf_counter()
             questions = generate_graph_questions(
                 questions_llm,
                 final_img_path,
@@ -1053,6 +1105,11 @@ def generate_graph(
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},
                 final_llm=llm,
+            )
+            print(
+                f"Initial QA generation finished ({len(questions)} questions). "
+                f"Elapsed: {time.perf_counter() - qa_generation_start:.04f}s.",
+                flush=True,
             )
 
         if not one_by_one:
