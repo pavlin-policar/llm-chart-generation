@@ -82,13 +82,10 @@ def define_llm_clients(api_url, model_name):
         model=model_name,
         openai_api_key="EMPTY",
         openai_api_base=api_url,
-        reasoning_effort="medium",
         extra_body={
             "chat_template_kwargs": {
                 "enable_thinking": True,
-            },
-            "logit_bias": {
-                "248069": 5.0,
+                "reasoning_effort": "xhigh",
             },
         },
         callbacks=[LLM_CALL_COLLECTOR],

@@ -3,6 +3,9 @@ import time
 
 import re
 
+from random import uniform
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+
 def after_think(text: str):
     """
     Split reasoning and response returned by Qwen.
@@ -159,11 +162,25 @@ def get_random_ds(d_meta, rng, preselect_id=None):
         raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
 
     # Load dataset via OpenML client
-    ds = openml.datasets.get_dataset(data_id)
+    for attempt in range(3):
+        try:
+            ds = openml.datasets.get_dataset(data_id)
 
-    X, y, categorical_indicator, attribute_names = ds.get_data(
-        dataset_format="dataframe"
-    )
+            X, y, categorical_indicator, attribute_names = ds.get_data(
+                dataset_format="dataframe"
+            )
+            break
+        except (ConnectionError, Timeout, ChunkedEncodingError) as error:
+            if attempt == 2:
+                raise
+
+            delay = 2 ** (attempt + 1) + uniform(0, 1)
+            print(
+                f"Dataset {data_id} fetch failed "
+                f"(attempt {attempt + 1}/3): {error}. "
+                f"Retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
 
     # Match old behavior: return full data including target column
     if y is not None:
