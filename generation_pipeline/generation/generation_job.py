@@ -35,6 +35,8 @@ from vllm_openai import VLLMChatOpenAI
 
 MAX_GRAPH_RETRIES = 3
 MAX_GRAPH_TYPE_RETRIES = 3
+# Keep this here until the review batch size is exposed in stage parameters.
+QUESTION_REVIEW_BATCH_SIZE = 20
 ERROR_PATH = None
 CURRENT_STAGE = None
 CURRENT_GRAPH_ID = None
@@ -729,15 +731,18 @@ def build_metadata(
 def verify_batched_questions(
     questions, llm, png_path, dataset_sem, graph_data, graph_df,
     plot_code, stages, final_llm, *, correction_round=0,
+    batch_size=QUESTION_REVIEW_BATCH_SIZE,
 ):
-    """Verify candidates once in groups of five and retain their judgments."""
+    """Verify candidates once in configurable batches and retain their judgments."""
     global CURRENT_STAGE
 
+    if batch_size <= 0:
+        raise ValueError("Question review batch size must be positive")
     review_phase = "Initial question review" if correction_round == 0 else "Corrected question review"
-    batch_count = (len(questions) + 4) // 5
-    for start in range(0, len(questions), 5):
-        batch = questions[start:start + 5]
-        batch_label = f"{review_phase}, batch {start // 5 + 1}/{batch_count} ({len(batch)} questions)"
+    batch_count = (len(questions) + batch_size - 1) // batch_size
+    for start in range(0, len(questions), batch_size):
+        batch = questions[start:start + batch_size]
+        batch_label = f"{review_phase}, batch {start // batch_size + 1}/{batch_count} ({len(batch)} questions)"
         metadata = {"question_batch_start": start, "question_correction_round": correction_round}
         if stages["questions"].get("parameters", {}).get("grounding_judge", True):
             CURRENT_STAGE = "question_judge"
