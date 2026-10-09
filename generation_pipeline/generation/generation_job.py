@@ -87,8 +87,9 @@ def define_llm_clients(api_url, model_name):
         extra_body={
             "chat_template_kwargs": {
                 "enable_thinking": True,
-                "reasoning_effort": "xhigh",
+                "reasoning_effort": "medium",
             },
+            "logit_bias": {"248069": 3.0},
         },
         callbacks=[LLM_CALL_COLLECTOR],
     )

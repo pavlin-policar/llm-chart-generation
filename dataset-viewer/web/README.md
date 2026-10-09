@@ -7,7 +7,9 @@ chart detail page is opened.
 
 The grid and detail view display chart acceptance, the sidebar can filter by
 accepted or non-accepted charts, and each selected iteration shows its feedback
-directly above its code. Question headings show the stored viability judgment.
+directly above its code. Question headings show separate visual and data validity
+judgments, visible even when collapsed, with labeled circles: green for valid,
+red for invalid, and gray for not evaluated.
 Each chart detail also joins typed `llm_calls` messages, marks included images,
 displays provider reasoning traces, and retains access to the exact payload
 stored in its source `metadata.jsonl` record.

@@ -1,5 +1,6 @@
 import base64
 import json
+from functools import wraps
 from typing import Literal
 
 import numpy as np
@@ -10,7 +11,21 @@ from tools import invoke_with_tools
 
 
 _UNPARSED = object()
+MAX_CALL_ATTEMPTS = 3
 MAX_QUESTION_COUNT_ATTEMPTS = 3
+
+
+def retry_call(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        for attempt in range(MAX_CALL_ATTEMPTS):
+            try:
+                return func(*args, **kwargs)
+            except Exception as error:
+                if attempt == MAX_CALL_ATTEMPTS - 1:
+                    raise
+                print(f"{func.__name__} failed ({attempt + 1}/{MAX_CALL_ATTEMPTS}), retrying: {error}", flush=True)
+    return wrapped
 
 
 class StrictModel(BaseModel):
@@ -1044,6 +1059,7 @@ def graph_evaluation_call(
     return response.model_dump()
 
 
+@retry_call
 def describe_graph_png(
     llm,
     png_path,
@@ -1387,16 +1403,22 @@ def generate_graph_questions(
         metadata = call_metadata
         if attempt:
             metadata = {**(call_metadata or {}), "question_count_retry": attempt}
-        response = invoke_structured_llm(
-            llm,
-            [msg],
-            GraphQuestions,
-            graph_df,
-            use_tools,
-            metadata,
-            enforce_schema_at_api=False,
-            final_llm=final_llm,
-        )
+        try:
+            response = invoke_structured_llm(
+                llm,
+                [msg],
+                GraphQuestions,
+                graph_df,
+                use_tools,
+                metadata,
+                enforce_schema_at_api=False,
+                final_llm=final_llm,
+            )
+        except Exception as error:
+            if attempt == MAX_QUESTION_COUNT_ATTEMPTS - 1:
+                raise
+            print(f"Question generation failed ({attempt + 1}/{MAX_QUESTION_COUNT_ATTEMPTS}), retrying: {error}", flush=True)
+            continue
         last_count = len(response.questions)
         if last_count == num:
             return [question.model_dump() for question in response.questions]
@@ -1404,6 +1426,7 @@ def generate_graph_questions(
     raise ValueError(f"Expected {num} questions, received {last_count}")
 
 
+@retry_call
 def correct_graph_questions(
     llm,
     png_path,
@@ -1472,6 +1495,7 @@ def correct_graph_questions(
     return [question.model_dump() for question in response.questions]
 
 
+@retry_call
 def generate_graph_question_one(
     llm,
     png_path,
@@ -1564,6 +1588,7 @@ def generate_graph_question_one(
     return response.model_dump()
 
 
+@retry_call
 def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None, *, return_reasons=False):
     """Check question-answer grounding using only the visible chart and domain context."""
     prompt = (
@@ -1675,6 +1700,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
     return [judgment.vlisual_valid for judgment in response.judgments]
 
 
+@retry_call
 def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None, *, return_reasons=False):
     """Check data-dependent question-answer claims using the plotted dataframe."""
     if graph_df is None:

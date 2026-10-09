@@ -55,7 +55,9 @@ RESULTS_DIR=/path/to/results \
   above the iteration code, acceptance status, descriptions, structured
   data, joined and typed LLM messages, image placeholders, reasoning traces,
   and access to the exact raw JSON from `metadata.jsonl`, plus questions,
-  their stored viability judgments, and per-model answers.
+  separate visual and data validity judgments, and per-model answers. Both
+  validity flags remain visible on collapsed question cards as labeled circles:
+  green for valid, red for invalid, and gray for not evaluated.
 - URL query parameters preserve filters, sorting, page, and selected chart.
 
 ## Caching

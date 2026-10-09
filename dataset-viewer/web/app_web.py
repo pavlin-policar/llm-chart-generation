@@ -20,6 +20,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from feedback_corrections import correction_rows
+from question_validity import question_validity_labels
 
 
 DEFAULT_MANIFEST_URL = "https://file.biolab.si/llm-chart-generation/manifest.json"
@@ -1392,11 +1393,7 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
         explanation = q.get("explanation", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
-        validity = q.get("vlisual_valid", q.get("valid"))
-        viability = (
-            "Viable" if validity is True else
-            "Not viable" if validity is False else "Not evaluated"
-        )
+        visual_validity, data_validity = question_validity_labels(q)
 
         frac = q_accuracy(qtext)
         marker_id = f"qacc-{gid[:8]}-{i}"
@@ -1417,8 +1414,11 @@ def render_questions(gid: str, questions: list[dict], results: list[dict], model
                 unsafe_allow_html=True,
             )
 
-        with st.expander(f"Q{i}. [{qtype}] [{viability}] {qtext}", expanded=False):
-            st.caption(f"Question viability: {viability}")
+        with st.expander(
+            f"Q{i}. [{qtype}] [{visual_validity}] [{data_validity}] {qtext}",
+            expanded=False,
+        ):
+            st.caption(f"{visual_validity} · {data_validity}")
             if explanation:
                 st.markdown(f"**Explanation:** {explanation}")
             st.markdown(f"**Ground truth:** {answer}")

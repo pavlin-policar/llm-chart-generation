@@ -23,6 +23,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from feedback_corrections import correction_rows, summarize_error_corrections
+from question_validity import question_validity_labels
 
 from chart_types import canonicalize_chart_type as canonicalize
 from indexer import build_index, read_records
@@ -1630,11 +1631,7 @@ def render_questions(
         explanation = q.get("explanation", "")
         answer = q.get("answer", "")
         basis = q.get("answer_basis", "")
-        validity = q.get("vlisual_valid", q.get("valid"))
-        viability = (
-            "Viable" if validity is True else
-            "Not viable" if validity is False else "Not evaluated"
-        )
+        visual_validity, data_validity = question_validity_labels(q)
 
         frac = q_accuracy(qtext)
         marker_id = f"qacc-{gid[:8]}-{i}"
@@ -1655,8 +1652,11 @@ def render_questions(
                 unsafe_allow_html=True,
             )
 
-        with st.expander(f"Q{i}. [{qtype}] [{viability}] {qtext}", expanded=False):
-            st.caption(f"Question viability: {viability}")
+        with st.expander(
+            f"Q{i}. [{qtype}] [{visual_validity}] [{data_validity}] {qtext}",
+            expanded=False,
+        ):
+            st.caption(f"{visual_validity} · {data_validity}")
             if explanation:
                 st.markdown(f"**Explanation:** {explanation}")
             st.markdown(f"**Ground truth:** {answer}")
