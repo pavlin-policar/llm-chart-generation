@@ -4,7 +4,8 @@ import time
 import re
 
 from random import uniform
-from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+from openml.exceptions import OpenMLServerError
+from requests.exceptions import ChunkedEncodingError, ConnectionError, HTTPError, Timeout
 
 def after_think(text: str):
     """
@@ -35,13 +36,55 @@ def strip_code_fences(s: str) -> str:
 
 # DATASET HELPERS
 
+OPENML_PULL_ATTEMPTS = 5
+RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_pull_error(error):
+    if isinstance(error, (ConnectionError, Timeout, ChunkedEncodingError)):
+        return True
+
+    if isinstance(error, HTTPError):
+        response = error.response
+        return response is not None and response.status_code in RETRYABLE_HTTP_STATUSES
+
+    if isinstance(error, OpenMLServerError):
+        # OpenML wraps non-XML HTTP errors and records their status in the text.
+        # OpenMLServerException.code is an API error code, not an HTTP status.
+        match = re.search(r"\bStatus\s+code\s*:\s*(\d{3})\b", str(error), re.IGNORECASE)
+        return match is not None and int(match.group(1)) in RETRYABLE_HTTP_STATUSES
+
+    return False
+
+
+def _retry_openml_pull(operation, description):
+    for attempt in range(OPENML_PULL_ATTEMPTS):
+        try:
+            return operation()
+        except (ConnectionError, Timeout, ChunkedEncodingError, HTTPError, OpenMLServerError) as error:
+            if not _is_retryable_pull_error(error) or attempt == OPENML_PULL_ATTEMPTS - 1:
+                raise
+
+            delay = 2 ** (attempt + 1) + uniform(0, 1)
+            print(
+                f"{description} failed "
+                f"(attempt {attempt + 1}/{OPENML_PULL_ATTEMPTS}): {error}. "
+                f"Retrying in {delay:.1f}s...",
+                flush=True,
+            )
+            time.sleep(delay)
+
+
 def openml_list_uci(status="active"):
     """
     Return OpenML catalog metadata sorted by dataset ID for random selection.
 
     The historical function name does not imply a UCI tag filter.
     """
-    ds_dict = openml.datasets.list_datasets(status=status)
+    ds_dict = _retry_openml_pull(
+        lambda: openml.datasets.list_datasets(status=status),
+        "OpenML dataset catalog fetch",
+    )
 
     # Deterministic ordering for paging
     all_ids = sorted(ds_dict.keys())
@@ -111,31 +154,34 @@ def get_dataset_semantics(did, sleep_s=0.0):
     - description
     - feature schema (name, data_type, is_target)
     """
-    ds = openml.datasets.get_dataset(int(did))
+    def fetch_semantics():
+        ds = openml.datasets.get_dataset(int(did))
 
+        features = []
+        for _, f in sorted(ds.features.items(), key=lambda kv: kv[0]):
+            # f is usually an OpenMLDataFeature (attribute-based),
+            # but keep a fallback for dict-like cases.
+            name = getattr(f, "name", None) if not isinstance(f, dict) else f.get("name")
+            data_type = getattr(f, "data_type", None) if not isinstance(f, dict) else f.get("data_type")
+            is_target = getattr(f, "is_target", False) if not isinstance(f, dict) else f.get("is_target", False)
+
+            features.append({
+                "name": name,
+                "data_type": data_type,
+                "is_target": bool(is_target),
+            })
+
+        return {
+            "id": int(did),
+            "name": ds.name,
+            "description": ds.description,
+            "features": features,
+        }
+
+    semantics = _retry_openml_pull(fetch_semantics, f"Dataset {did} metadata fetch")
     if sleep_s and sleep_s > 0:
         time.sleep(sleep_s)
-
-    features = []
-    for _, f in sorted(ds.features.items(), key=lambda kv: kv[0]):
-        # f is usually an OpenMLDataFeature (attribute-based),
-        # but keep a fallback for dict-like cases.
-        name = getattr(f, "name", None) if not isinstance(f, dict) else f.get("name")
-        data_type = getattr(f, "data_type", None) if not isinstance(f, dict) else f.get("data_type")
-        is_target = getattr(f, "is_target", False) if not isinstance(f, dict) else f.get("is_target", False)
-
-        features.append({
-            "name": name,
-            "data_type": data_type,
-            "is_target": bool(is_target),
-        })
-
-    return {
-        "id": int(did),
-        "name": ds.name,
-        "description": ds.description,
-        "features": features,
-    }
+    return semantics
 
 def get_random_ds(d_meta, rng, preselect_id=None):
     """
@@ -151,36 +197,23 @@ def get_random_ds(d_meta, rng, preselect_id=None):
     else:
         data_id = int(preselect_id)
 
-    # Load dataset via OpenML client
-    for attempt in range(3):
-        try:
-            ds = openml.datasets.get_dataset(data_id)
+    def fetch_data():
+        ds = openml.datasets.get_dataset(data_id)
 
-            fmt = str(ds.format).upper()
-            if fmt != "ARFF":
-                raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
+        fmt = str(ds.format).upper()
+        if fmt != "ARFF":
+            raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
 
-            X, y, categorical_indicator, attribute_names = ds.get_data(
-                dataset_format="dataframe"
-            )
-            break
-        except (ConnectionError, Timeout, ChunkedEncodingError) as error:
-            if attempt == 2:
-                raise
+        X, y, categorical_indicator, attribute_names = ds.get_data(
+            dataset_format="dataframe"
+        )
 
-            delay = 2 ** (attempt + 1) + uniform(0, 1)
-            print(
-                f"Dataset {data_id} fetch failed "
-                f"(attempt {attempt + 1}/3): {error}. "
-                f"Retrying in {delay:.1f}s..."
-            )
-            time.sleep(delay)
+        # Match old behavior: return full data including target column
+        if y is not None:
+            data = X.copy()
+            data[ds.default_target_attribute] = y
+            return data
+        return X
 
-    # Match old behavior: return full data including target column
-    if y is not None:
-        data = X.copy()
-        data[ds.default_target_attribute] = y
-    else:
-        data = X
-
+    data = _retry_openml_pull(fetch_data, f"Dataset {data_id} fetch")
     return data_id, data
