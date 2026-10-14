@@ -1692,6 +1692,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
             "Give a specific reason for BOTH passing and failing judgments: identify the visible "
             "marks, labels, values, and supplied context that establish the answer, or explain "
             "which evidence is missing, ambiguous, contradictory, or unnecessary to answer. "
+            "Keep each reason concise, preferably 1-2 short sentences, citing decisive evidence or failures without restating the question or answer. "
             "Do not treat the proposed answer as evidence. Return exactly one judgment per pair in order.\n"
             'Return ONLY JSON: {"judgments": [{"vlisual_valid": true, "reason": "specific visual evidence"}]}.'
         )
@@ -1740,7 +1741,12 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         "reconstruct input data from typed values. Use a new variable for derived "
         "data and compute evidence from the supplied rows.\n"
         "In every run_pandas call, assign computed evidence to the Python variable `result`. "
-        "Do not use print(). Batch checks are allowed; label results by question number. "
+        "Do not use print(). Prefer verifying the entire question batch in one or a few "
+        "run_pandas calls. Reuse shared filters and aggregates where appropriate, and return "
+        "compact computed evidence labeled by question number in `result`. "
+        "Verify every data-dependent premise and every claim in each explanation and answer "
+        "independently; sharing a computation does not replace checking each claim. "
+        "Make additional calls when evidence is missing or computations fail. "
         "Only status='ok' computations on df count as evidence; hardcoded answers or "
         "verification strings do not. Correct tool errors and retry.\n"
         "Set data_valid=false for incorrect, unsupported, or unverified data-dependent claims. "
@@ -1757,6 +1763,7 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
             "BOTH passing and failing judgments. Cite the computed tool evidence, filters, "
             "units, and comparison against the proposed answer, or explain the incorrect or "
             "unverified claim. If there are no data-dependent claims, explicitly say so.\n"
+            "Keep each reason concise, preferably 1-2 short sentences, citing decisive evidence or failures without restating the question or answer.\n"
             'Return ONLY JSON: {"judgments": [{"data_valid": true, "reason": "specific computed evidence"}]}.'
         )
     pairs = [{"question": q["question"], "explanation": q.get("explanation", ""), "answer": q["answer"]} for q in questions]
