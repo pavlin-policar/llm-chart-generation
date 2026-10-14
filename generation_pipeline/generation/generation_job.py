@@ -1182,7 +1182,7 @@ def run_generation(args, job_id, stages, llm, llm_think, dataset_ids):
     )
     target_index = start_index + args.datasets * graphs_per_dataset
     rng = np.random.default_rng(args.seed)
-    datasets_meta = openml_list_uci()
+    datasets_meta = None if args.fixed_datasets else openml_list_uci()
 
     datasets_iter = iter(dataset_ids or [])
 

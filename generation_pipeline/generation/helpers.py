@@ -37,13 +37,9 @@ def strip_code_fences(s: str) -> str:
 
 def openml_list_uci(status="active"):
     """
-    Returns a list of dataset metadata dicts from OpenML, filtered by tag='uci',
-    using the OpenML *Python client* (no raw REST calls).
+    Return OpenML catalog metadata sorted by dataset ID for random selection.
 
-    Notes:
-    - openml.datasets.list_datasets returns a dict keyed by dataset_id.
-    - The OpenML Python client does not expose a true server-side offset the same
-      way the REST endpoint does. We emulate offset/limit by slicing locally.
+    The historical function name does not imply a UCI tag filter.
     """
     ds_dict = openml.datasets.list_datasets(status=status)
 
@@ -143,28 +139,26 @@ def get_dataset_semantics(did, sleep_s=0.0):
 
 def get_random_ds(d_meta, rng, preselect_id=None):
     """
-    Pick a random UCI dataset from metadata (list of dicts),
-    ensure ARFF format, and load the data as a pandas DataFrame.
+    Load an ARFF dataset as a pandas DataFrame.
+
+    Random selection requires catalog metadata. A preselected ID is fetched
+    directly, so d_meta and rng can be None in that case.
     """
 
     # Pick dataset id using existing helper
     if preselect_id is None:
         data_id = pick_random_dataset_id(d_meta, rng=rng)
     else:
-        data_id = preselect_id
-
-    # Find corresponding metadata entry (d_meta is a list)
-    meta = next(d for d in d_meta if int(d["did"]) == int(data_id))
-
-    # Enforce ARFF format
-    fmt = str(meta.get("format", "")).upper()
-    if fmt != "ARFF":
-        raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
+        data_id = int(preselect_id)
 
     # Load dataset via OpenML client
     for attempt in range(3):
         try:
             ds = openml.datasets.get_dataset(data_id)
+
+            fmt = str(ds.format).upper()
+            if fmt != "ARFF":
+                raise RuntimeError(f"Picked dataset {data_id} is not in ARFF format (got {fmt}).")
 
             X, y, categorical_indicator, attribute_names = ds.get_data(
                 dataset_format="dataframe"
