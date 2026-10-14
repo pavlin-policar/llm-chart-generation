@@ -1,0 +1,132 @@
+{
+  "range": "6000 <= dataset ID < 40000",
+  "source_all": "https://www.openml.org/api/v1/json/data/list/limit/100000/status/all",
+  "source_active": "https://www.openml.org/api/v1/json/data/list/limit/100000/status/active",
+  "all_catalog_count": 24411,
+  "active_catalog_count": 6434,
+  "range_count": 16621,
+  "range_status_counts": [
+    {
+      "status": "active",
+      "count": 16
+    },
+    {
+      "status": "deactivated",
+      "count": 16578
+    },
+    {
+      "status": "in_preparation",
+      "count": 27
+    }
+  ],
+  "deactivated_chembl_qsar_count": 16578,
+  "independent_active_query_count": 16,
+  "active_query_difference_count": 0,
+  "active_datasets": [
+    {
+      "did": 6331,
+      "name": "LoanDefaultPrediction",
+      "status": "active"
+    },
+    {
+      "did": 6332,
+      "name": "cylinder-bands",
+      "status": "active"
+    },
+    {
+      "did": 23380,
+      "name": "cjs",
+      "status": "active"
+    },
+    {
+      "did": 23381,
+      "name": "dresses-sales",
+      "status": "active"
+    },
+    {
+      "did": 23383,
+      "name": "SensorDataResource",
+      "status": "active"
+    },
+    {
+      "did": 23394,
+      "name": "COMET_MC_SAMPLE",
+      "status": "active"
+    },
+    {
+      "did": 23395,
+      "name": "COMET_MC_SAMPLE",
+      "status": "active"
+    },
+    {
+      "did": 23396,
+      "name": "COMET_MC_SAMPLE",
+      "status": "active"
+    },
+    {
+      "did": 23397,
+      "name": "COMET_MC_SAMPLE",
+      "status": "active"
+    },
+    {
+      "did": 23420,
+      "name": "yagoSchema.ttl",
+      "status": "active"
+    },
+    {
+      "did": 23499,
+      "name": "breast-cancer-dropped-missing-attributes-values",
+      "status": "active"
+    },
+    {
+      "did": 23512,
+      "name": "higgs",
+      "status": "active"
+    },
+    {
+      "did": 23513,
+      "name": "KDD98",
+      "status": "active"
+    },
+    {
+      "did": 23515,
+      "name": "sulfur",
+      "status": "active"
+    },
+    {
+      "did": 23516,
+      "name": "debutanizer",
+      "status": "active"
+    },
+    {
+      "did": 23517,
+      "name": "numerai28.6",
+      "status": "active"
+    }
+  ],
+  "deactivation_reason": "Historical OpenML maintainer discussions document MetaQSAR sparse ARFF molecule_id parsing errors and verification concerns; current per-dataset reasons are not exposed in the inspected metadata. See audits/openml_deactivated_2026-10-14/report.md.",
+  "checked_date": "2026-10-14",
+  "representative_deactivated_dataset": {
+    "id": "6337",
+    "name": "QSAR-DATASET-FOR-DRUG-TARGET-CHEMBL1075174",
+    "version": "1",
+    "description": "This dataset contains QSAR data (from ChEMBL version 17) showing activity values (unit is pseudo-pCI50) of several compounds on drug target ChEMBL_ID: CHEMBL1075174 (TID: CHEMBL1075174), and it has 10 rows and 43 features (including IDs and class feature: molecule_id and pXC50). The features represent Molecular Descriptors which were generated from SMILES strings (with imputation of missing values if they exist).",
+    "description_version": "1",
+    "format": "ARFF",
+    "creator": "Dr Jeremy Besnard, Dr Ivan Olier, Dr Noureddin Sadawi, Dr Larisa Soldatova, Dr Crina Grosan, Prof Ross King, Dr Richard Bickerton, Prof Andrew Hopkins and Dr Willem van Hoorn",
+    "collection_date": "November 2013",
+    "upload_date": "2016-04-04T17:36:06",
+    "licence": "Public",
+    "url": "https://openml.org/data/v1/download/1859458/QSAR-DATASET-FOR-DRUG-TARGET-CHEMBL1075174.arff",
+    "parquet_url": "https://data.openml.org/datasets/0000/6337/dataset_6337.pq",
+    "file_id": "1859458",
+    "default_target_attribute": "pXC50",
+    "row_id_attribute": "molecule_id",
+    "tag": "MetaQSAR",
+    "visibility": "public",
+    "original_data_url": "https://www.ebi.ac.uk/chembl/target/inspect/CHEMBL1075174",
+    "status": "deactivated",
+    "processing_date": "2018-10-03 22:08:20",
+    "md5_checksum": "6b3a2ec659b06740913179ec19273497"
+  }
+}
