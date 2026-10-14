@@ -292,7 +292,9 @@ def invoke_structured_llm(
         )
 
 
-def determine_dataset_usability_call(llm, metadata, call_metadata=None) -> dict:
+def determine_dataset_usability_call(
+    llm, metadata, call_metadata=None, *, df=None, use_tools=False
+) -> dict:
     """
     Determines whether the dataset is suitable for generating meaningful
     visualizations.
@@ -315,7 +317,25 @@ def determine_dataset_usability_call(llm, metadata, call_metadata=None) -> dict:
         f"DATASET_METADATA:\n{json.dumps(metadata, ensure_ascii=False)}"
     )
 
-    response = invoke_structured_llm(llm, prompt, DatasetUsability, call_metadata=call_metadata)
+    if use_tools and df is not None:
+        prompt += (
+            "\nUse run_pandas on df to inspect the actual dataset before deciding. "
+            "Check feature types, missingness, distinct values, and whether "
+            "meaningful comparisons or relationships can be plotted. "
+            "Batch these checks where possible and return compact evidence. "
+            "Assign tool results to `result`; do not use print(). "
+            "Data inspection does not replace the semantic requirements above. "
+            'Your final response must be ONLY JSON: {"useful": true or false}.'
+        )
+
+    response = invoke_structured_llm(
+        llm,
+        prompt,
+        DatasetUsability,
+        df=df,
+        use_tools=use_tools,
+        call_metadata=call_metadata,
+    )
     return response.model_dump()
 
 
