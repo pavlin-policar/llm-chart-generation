@@ -26,19 +26,24 @@ The dataset selector automatically discovers `dataset/<name>/metadata.jsonl`
 under this Git repository. No dataset location needs to be entered.
 
 The chart uses the image marked `selected`, or otherwise the latest `_itN`
-iteration. A graph whose selected/final image is missing is excluded, with
-counts shown in the sidebar. The app indexes byte offsets instead of retaining
+iteration. A graph whose selected/final image is missing or empty is excluded,
+with counts shown in the sidebar. Images are fully validated and decoded before
+display. For other damaged images, the app shows the affected path and offers
+**Retry image** after restoration or **Skip chart** without saving labels.
+Skipping excludes every question for that chart for the current session only;
+it does not count as a completed review. After restoring missing or empty files,
+use **Refresh images** in the sidebar to include those charts again.
+The app indexes byte offsets instead of retaining
 large generation traces in memory. Metadata size and modification time
 invalidate the in-memory index automatically.
 
-- **Data validity:** all data-dependent claims in the question, explanation,
-  and answer agree with the plotted data and its transformations.
-- **Visual / semantic validity:** the answer and explanation are supported by
-  readable chart evidence and the sanitized dataset context, without missing
-  specialist premises or leaking the answer in the question. Answering must
-  actually require reading the image. Reasonable visual approximations count.
+Judge these independently, following the model validator prompts:
+
+- **Data agreement:** Do the data in the question, answer, and explanation agree with the chart? Choose **Yes**, **No**, **Unsure**, or **Partly**. Check values, calculations, comparisons, units, and reasonable estimates; **Partly** means some claims agree and others do not.
+- **Visual / semantic check:** Does answering require reading the chart, and does the chart support the answer and explanation? Choose **No** for a self-contained question answerable from its wording or allowed context alone, even if correct. No hidden data, unstated specialist knowledge, or leaked chart observations/answers; reasonable estimates count. **Partly** means the image is needed but only some claims are supported; **Unsure** means you cannot tell.
 - **Unsure:** insufficient evidence; saved as JSON `null`, alongside the
-  explicit `Unsure` choice. Neither judgment is preselected.
+  explicit `Unsure` choice. Both checks use **Yes**, **No**, **Unsure**, and
+  **Partly**; neither judgment is preselected.
 
 The app displays the chart, question, proposed answer, explanation, and
 sanitized dataset context. Use **Unsure** when this evidence cannot establish
@@ -66,8 +71,10 @@ and annotator, updated after each saved review:
   human/model column labels, and numbers excluded from each comparison.
 
 Metrics use only final saved responses for questions in the current dataset
-and annotator. Human **Unsure** and missing model judgments are excluded per
-axis. Undefined metrics display **N/A**. The reviewed sample is stratified,
+and annotator. **Yes** maps to valid and **No** to invalid. Human **Partly**,
+**Unsure**, and missing model judgments are excluded from binary metrics per
+axis; **Partly** is counted separately from **Unsure**. Undefined metrics display
+**N/A**. The reviewed sample is stratified,
 so these metrics do not estimate full-dataset performance without weighting.
 Final labels can be influenced by revealed model feedback; the section also
 reports how many reviews recorded a reveal before saving.
@@ -103,12 +110,14 @@ Each line contains:
 
 - `schema_version`, `annotation_id`, `question_key`, `annotator_id`, `session_id`,
   UTC timestamps, review duration, and notes;
-- `human_labels.data_valid` and `human_labels.visual_valid` (boolean or `null`),
-  plus explicit `human_choices`;
+- `human_labels.data_valid` and `human_labels.visual_valid`: `true` for **Yes**,
+  `false` for **No**, `null` for **Unsure**, or `"partly"` for **Partly**,
+  alongside explicit `human_choices`. Older **Valid** / **Invalid** labels
+  remain compatible;
 - `model_labels` with separate normalized flags, the original visual flag field
   name, and the model's reasons when supplied;
 - `model_feedback_displayed`, `validity_displayed_at`, `labels_before_reveal`,
-  and `labels_changed_after_reveal` (new records use schema version 2);
+  and `labels_changed_after_reveal` (new records use schema version 4);
 - the complete original `question` object, its zero-based `question_index`, and
   a source question ID if supplied;
 - `dataset_name`, `dataset_dir`, original dataset metadata and source dataset ID;

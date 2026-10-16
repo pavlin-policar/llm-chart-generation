@@ -9,7 +9,10 @@ import random
 import time
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 
 @contextmanager
@@ -94,7 +97,17 @@ def selected_image(record: dict, dataset_dir: Path) -> tuple[dict, Path | None]:
     image = next((image for image in images if image.get("selected")), max(images, key=iteration))
     stored = Path(image["path"])
     candidates = [stored] if stored.is_absolute() else [dataset_dir / stored, dataset_dir / "images" / stored.name]
-    return image, next((path.resolve() for path in candidates if path.is_file()), None)
+    return image, next((path.resolve() for path in candidates if path.is_file() and path.stat().st_size > 0), None)
+
+
+def load_chart_image(path: Path) -> Image.Image:
+    """Validate and decode the same image bytes that will be displayed."""
+    payload = path.read_bytes()
+    with Image.open(BytesIO(payload)) as check:
+        check.verify()
+    with Image.open(BytesIO(payload)) as image:
+        image.load()
+        return image.copy()
 
 
 def index_dataset(metadata: Path) -> dict:
@@ -123,7 +136,7 @@ def index_dataset(metadata: Path) -> dict:
                 continue
             _, image_path = selected_image(record, metadata.parent)
             if image_path is None:
-                warnings["Graphs without a usable selected/final image"] += 1
+                warnings["Graphs with missing or empty selected/final images"] += 1
                 continue
             questions = record["graph"].get("questions", [])
             if not isinstance(questions, list):
@@ -200,11 +213,12 @@ def annotation_statistics(entries: list[dict], responses: list[dict]) -> dict:
     classes = []
     for name, field in (("Data validity", "data_valid"), ("Visual / semantic validity", "visual_valid")):
         counts = Counter()
-        human_unsure = model_missing = 0
+        human_unsure = human_partly = model_missing = 0
         for row in saved.values():
             human = row.get("human_labels", {}).get(field)
             model = row.get("model_labels", {}).get(field)
-            human_unsure += not isinstance(human, bool)
+            human_partly += human == "partly"
+            human_unsure += not isinstance(human, bool) and human != "partly"
             model_missing += not isinstance(model, bool)
             if not isinstance(human, bool) or not isinstance(model, bool):
                 continue
@@ -216,6 +230,7 @@ def annotation_statistics(entries: list[dict], responses: list[dict]) -> dict:
             "Validity": name, "Comparable pairs": n,
             "Agreement": ratio(tp + tn, n),
             "Excluded pairs": len(saved) - n,
+            "Human partly": human_partly,
             "Human unsure / missing": human_unsure, "Model not evaluated": model_missing,
             "Human valid / Model valid": tp, "Human invalid / Model invalid": tn,
             "Human invalid / Model valid": fp, "Human valid / Model invalid": fn,

@@ -186,6 +186,8 @@ def invoke_llm(llm, messages, df=None, use_tools=False, call_metadata=None, sele
 
 
 def _final_response_text(response):
+    if response.content is None or response.content == []:
+        return ""
     if not isinstance(response.content, str):
         raise ValueError("Locally validated structured response must be JSON text")
 
@@ -221,6 +223,9 @@ def _preserves_existing_content(original, formatted):
 
 
 def _format_structured_response(response, schema, formatter_llm, call_metadata, original_json):
+    content = _final_response_text(response)
+    if not strip_code_fences(content):
+        raise ValueError("Cannot format an empty structured response")
     prompt = (
         "Format the RESPONSE below as JSON matching the required schema. "
         "This is a formatting task only. Preserve every existing question, explanation, answer, "
@@ -228,7 +233,7 @@ def _format_structured_response(response, schema, formatter_llm, call_metadata, 
         "Omit only fields forbidden by the schema. Do not answer the original "
         "task, paraphrase, recalculate, correct, add or remove list items, or "
         "infer missing information.\n\n"
-        f"RESPONSE:\n{_final_response_text(response)}"
+        f"RESPONSE:\n{content}"
     )
     metadata = {**(call_metadata or {}), "format_retry": True}
     formatted = formatter_llm.with_structured_output(
@@ -257,7 +262,7 @@ def invoke_structured_llm(
     *,
     dataframe_name="df",
 ):
-    """Keep valid model output; use a separate formatter only when validation fails."""
+    """Retry empty generations; format only non-empty output that fails validation."""
     config = {"metadata": call_metadata} if call_metadata else None
 
     if final_llm is not None and llm is final_llm and not (use_tools and df is not None):
@@ -272,14 +277,23 @@ def invoke_structured_llm(
             method="json_schema",
         ).invoke(messages, config=config)
 
-    if use_tools and df is not None:
-        response, history = invoke_with_tools(
-            llm, messages, df, config=config, return_history=True, dataframe_name=dataframe_name,
+    for attempt in range(MAX_CALL_ATTEMPTS):
+        if use_tools and df is not None:
+            response, history = invoke_with_tools(
+                llm, messages, df, config=config, return_history=True, dataframe_name=dataframe_name,
+            )
+            if response is None:
+                response = llm.invoke(history, config=config)
+        else:
+            response = llm.invoke(messages, config=config)
+        if strip_code_fences(_final_response_text(response)):
+            break
+        if attempt == MAX_CALL_ATTEMPTS - 1:
+            raise ValueError(f"Structured generation returned an empty response after {MAX_CALL_ATTEMPTS} attempts")
+        print(
+            f"Structured generation returned an empty response ({attempt + 1}/{MAX_CALL_ATTEMPTS}), retrying generation",
+            flush=True,
         )
-        if response is None:
-            response = llm.invoke(history, config=config)
-    else:
-        response = llm.invoke(messages, config=config)
     parsed_response = _UNPARSED
     try:
         parsed_response = _parse_response_json(response)
