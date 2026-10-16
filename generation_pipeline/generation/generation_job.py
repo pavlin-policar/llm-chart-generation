@@ -31,6 +31,7 @@ from calls import (
     sanitize_dataset_description_call,
 )
 from helpers import get_dataset_semantics, get_random_ds, openml_list_uci
+from plot_execution import execute_graph_code
 from vllm_openai import VLLMChatOpenAI
 
 MAX_GRAPH_RETRIES = 3
@@ -369,40 +370,6 @@ def generate_graph_types(
             print(f"Error generating graph types, retrying ({retry}) with dataset {dataset_id}... {error}")
 
     return None
-
-
-def execute_graph_code(code, df, selected_plot, graph_file_path):
-
-    if os.path.exists(graph_file_path):
-        os.remove(graph_file_path)
-
-    exec_namespace = {
-        "df": df,
-        "selected_plot": selected_plot,
-        "graph_file_path": graph_file_path,
-        "__builtins__": __builtins__,
-    }
-
-    exec(code, exec_namespace, exec_namespace)
-
-    if not os.path.exists(graph_file_path):
-        raise ValueError("Generated code did not save image")
-
-    graph_data = exec_namespace.get("graph_data")
-    graph_df = exec_namespace.get("graph_df")
-
-    if not isinstance(graph_data, dict):
-        raise ValueError("Generated code did not define graph_data as a dictionary")
-
-    try:
-        json.dumps(graph_data)
-    except (TypeError, ValueError) as error:
-        raise ValueError("graph_data is not JSON-serializable") from error
-
-    if not isinstance(graph_df, type(df)):
-        raise ValueError("Generated code did not define graph_df as a pandas DataFrame")
-
-    return graph_data, graph_df
 
 
 def review_and_regenerate(
@@ -1063,6 +1030,7 @@ def generate_graph(
                     graph_data,
                     valid_questions,
                     sanitized_dataset_desc=dataset_sem["sanitized_description"],
+                    plot_code=code,
                     difficulty=difficulty,
                     graph_df=graph_df,
                     use_tools=stage_uses_tools(stages, "questions"),
@@ -1107,6 +1075,7 @@ def generate_graph(
                 graph_data,
                 num_questions,
                 sanitized_dataset_desc=dataset_sem["sanitized_description"],
+                plot_code=code,
                 graph_df=graph_df,
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},

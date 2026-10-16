@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 
+# Local tests
+**/tests/
+
 # Data
 dataset/
 results/

@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import re
 import tempfile
 
 import numpy as np
@@ -98,6 +99,9 @@ FORBIDDEN_NODES = (
 
 
 class PandasCodeValidator(ast.NodeVisitor):
+    def __init__(self, dataframe_name="df"):
+        self.dataframe_name = dataframe_name
+
     def visit(self, node):
         if isinstance(node, FORBIDDEN_NODES):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -122,16 +126,16 @@ class PandasCodeValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_arg(self, node):
-        if node.arg == "df":
-            raise ValueError("The supplied df is read-only; do not replace or shadow it")
+        if node.arg == self.dataframe_name:
+            raise ValueError(f"The supplied {self.dataframe_name} is read-only; do not replace or shadow it")
         self.generic_visit(node)
 
     def _check_dataframe_write(self, node):
         root = node
         while isinstance(root, (ast.Attribute, ast.Subscript)):
             root = root.value
-        if isinstance(root, ast.Name) and root.id == "df" and isinstance(node.ctx, ast.Store):
-            raise ValueError("The supplied df is read-only; use a new variable for derived data")
+        if isinstance(root, ast.Name) and root.id == self.dataframe_name and isinstance(node.ctx, ast.Store):
+            raise ValueError(f"The supplied {self.dataframe_name} is read-only; use a new variable for derived data")
 
     def visit_Call(self, node):
         if isinstance(node.func, ast.Name) and node.func.id == "print":
@@ -149,9 +153,9 @@ class PandasCodeValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _validate_pandas_code(code):
+def _validate_pandas_code(code, dataframe_name="df"):
     tree = ast.parse(code, mode="exec")
-    PandasCodeValidator().visit(tree)
+    PandasCodeValidator(dataframe_name).visit(tree)
 
     assigned_names = {
         node.id for statement in tree.body for node in ast.walk(statement) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
@@ -209,7 +213,7 @@ def _error_outcome(error, error_code):
     }
 
 
-def create_dataframe_tools(df):
+def create_dataframe_tools(df, *, dataframe_name="df"):
     @tool
     def run_pandas(code: str) -> str:
         """Run general read-only pandas code on `df`.
@@ -236,7 +240,7 @@ def create_dataframe_tools(df):
         """
 
         try:
-            tree = _validate_pandas_code(code)
+            tree = _validate_pandas_code(code, dataframe_name)
         except Exception as error:
             return json.dumps(_error_outcome(error, "invalid_code"), ensure_ascii=False)
 
@@ -247,23 +251,24 @@ def create_dataframe_tools(df):
             working_df.columns = df.columns.copy(deep=True)
             namespace = {
                 "__builtins__": SAFE_BUILTINS,
-                "df": working_df,
+                dataframe_name: working_df,
                 "np": np,
                 "pd": pd,
             }
             exec(compile(tree, "<pandas-tool>", "exec"), namespace, namespace)
             if (
-                namespace["df"] is not working_df
+                namespace[dataframe_name] is not working_df
                 or not working_df.equals(df)
                 or working_df.index.names != df.index.names
                 or working_df.columns.names != df.columns.names
             ):
-                raise ValueError("The supplied df was replaced or modified; use a copy in a new variable")
+                raise ValueError(f"The supplied {dataframe_name} was replaced or modified; use a copy in a new variable")
             result = json.loads(_serialize_result(namespace["result"]))
             return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
         except Exception as error:
             return json.dumps(_error_outcome(error, "execution_error"), ensure_ascii=False)
 
+    run_pandas.description = re.sub(r"\bdf\b", dataframe_name, run_pandas.description)
     return [run_pandas]
 
 
@@ -304,10 +309,10 @@ def create_code_execution_tool(df, selected_plot):
     return execute_plot_code
 
 
-def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return_history=False):
+def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return_history=False, *, dataframe_name="df"):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
-    tools = create_dataframe_tools(df)
+    tools = create_dataframe_tools(df, dataframe_name=dataframe_name)
     if selected_plot is not None:
         tools.append(create_code_execution_tool(df, selected_plot))
     tools_by_name = {dataframe_tool.name: dataframe_tool for dataframe_tool in tools}

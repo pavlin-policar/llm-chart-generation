@@ -57,3 +57,11 @@ See `generation_pipeline/README.md` for setup and usage.
 ### `dataset-viewer/`
 
 A Streamlit app for browsing the generated dataset. Displays the 2,228 charts with per-iteration images, generation feedback, code, questions, and per-model evaluation results. The public instance is available at <https://llm-chart-generation.streamlit.app>. See `dataset-viewer/README.md` for setup and usage.
+
+### `question-label/`
+
+A Streamlit app for human review of question data validity and visual/semantic
+validity. Samples across model validity combinations, reveals model judgments
+on request, and saves final labels when advancing. Includes per-dataset agreement,
+precision, and recall statistics and resumable JSONL annotations with question,
+graph, image, and sampling provenance. See [question-label/README.md](question-label/README.md).
