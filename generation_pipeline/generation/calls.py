@@ -643,6 +643,17 @@ CODE_TOOL_INSTRUCTIONS = (
     "- The final response must still define `graph_df` and `graph_data` and save the image to `graph_file_path`.\n\n"
 )
 
+PLOT_DATAFRAME_INSTRUCTIONS = (
+    "- Use documented category mappings and measurement units. If a mapping is unavailable, retain the original codes rather than guessing.\n"
+    "- Check unit scales and transformations; keep plotted values, labels, and metadata consistent.\n"
+    "- Source-column restrictions apply only to input `df`; derived output columns are allowed.\n"
+    '- Set features_expected=selected_plot["features"] and features_used=list(graph_df.columns), including derived aggregates.\n'
+    "- `graph_df` must contain exactly the processed data used to plot. Retain grouping keys AND plotted aggregates "
+    "(e.g., class, sex, count), and draw the chart from those values.\n"
+    "- `derived_features` lists derived/aggregated columns retained in `graph_df`.\n"
+    "- Set n_rows_plotted=int(len(graph_df)).\n"
+)
+
 def graph_call(
     llm,
     features,
@@ -667,15 +678,15 @@ def graph_call(
         "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
         "selected_plot has exactly these keys:\n"
         '  - "type": the required plot type to render\n'
-        '  - "features": the exact list of column names that must be used for the plot\n'
+        '  - "features": the source column names to use from df\n'
         '  - "description": short description of the plot\n'
         '  - "style": matplotlib style of the plot\n\n'
         "Your job:\n"
         '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         "- Follow `plan` for x/y/hue/facet/aggregation/binning/filters/figsize/title.\n"
         "- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path', use this variable but don't change it.\n"
-        '- Use ONLY the columns listed in selected_plot["features"].\n'
-        "- You may derive temporary helper columns ONLY from those listed features.\n\n"
+        '- Read source data ONLY from df columns listed in selected_plot["features"].\n'
+        "- You may compute and retain derived columns from those source features, including aggregates.\n\n"
         "Libraries:\n"
         "- Use ONLY pandas, numpy, matplotlib, scikit-learn and default python libraries. Do NOT use seaborn!\n"
         "- Do NOT use pandas plotting; always use matplotlib directly.\n\n"
@@ -700,13 +711,12 @@ def graph_call(
         '  "title": string\n'
         "}\n\n"
         "Validation rules:\n"
-        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
-        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
-        '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach\n'
+        + PLOT_DATAFRAME_INSTRUCTIONS
+        + '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach\n'
         '  that still matches selected_plot["type"] but uses the remaining provided features only;\n'
         '  ALWAYS keep graph_data["features_expected"] unchanged.\n'
         '- Do NOT change selected_plot["type"].\n'
-        '- Do NOT use columns outside selected_plot["features"].\n'
+        '- Do NOT read any other source columns from df.\n'
         "- Do NOT mutate selected_plot in any way in general.\n"
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
@@ -759,17 +769,14 @@ def recode_call(
         "2) A JSON object named `selected_plot` that was produced by a previous model call.\n"
         "selected_plot has exactly these keys:\n"
         '  - "type": the required plot type to render\n'
-        '  - "features": the exact list of column names that must be used for the plot\n'
+        '  - "features": the source column names to use from df\n'
         '  - "description": short description of the plot\n'
         '  - "style": matplotlib style of the plot\n\n'
         "Your job:\n"
         '- Render EXACTLY ONE plot whose plot type matches selected_plot["type"].\n'
         f"- Save that plot with plt.savefig(), the path will be available in a variable named 'graph_file_path'\n"
-        '- Use ONLY the columns listed in selected_plot["features"].\n'
-        "- You may derive temporary helper columns ONLY from those listed features "
-        "(e.g., binning a numeric feature, extracting month from a datetime feature), "
-        "but you must not use any other df columns.\n"
-        "- You may replace feature names in titles or labels with clearer semantic equivalents when their meaning can be reliably inferred.\n\n"
+        '- Read source data ONLY from df columns listed in selected_plot["features"].\n'
+        "- You may compute and retain derived columns from those source features, including aggregates.\n"
         "If `previous_code` and `corrections` are provided:\n"
         "- Start from `previous_code` and apply ONLY the requested corrections.\n"
         "- Do NOT change the plot type.\n"
@@ -784,8 +791,8 @@ def recode_call(
         "graph_data = {\n"
         '  "plot_type": string,                     # must equal selected_plot["type"]\n'
         '  "features_expected": list[str],          # must equal selected_plot["features"] exactly\n'
-        '  "features_used": list[str],              # columns actually used (include derived names if created)\n'
-        '  "derived_features": list[str],           # names of any derived helper columns you create\n'
+        '  "features_used": list[str],              # final graph_df columns, including derived/aggregated names\n'
+        '  "derived_features": list[str],           # derived/aggregated columns retained in graph_df\n'
         '  "x": string or null,\n'
         '  "y": string or null,\n'
         '  "hue": string or null,\n'
@@ -799,12 +806,11 @@ def recode_call(
         '  "title": string\n'
         "}\n\n"
         "Validation rules:\n"
-        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
-        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows or columns).\n"
-        '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach '
+        + PLOT_DATAFRAME_INSTRUCTIONS
+        + '- If any feature in selected_plot["features"] is missing from df.columns, pick a different plot approach '
         'that still matches selected_plot["type"] but uses the remaining provided features only; '
         'ALWAYS keep graph_data["features_expected"] unchanged.\n'
-        '- Do NOT use columns outside selected_plot["features"].\n'
+        '- Do NOT read any other source columns from df.\n'
         "- Do NOT mutate selected_plot in any way in general.\n"
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n\n"
@@ -859,8 +865,8 @@ def graph_error_call(
         "binning, filters, axes, and visual semantics as much as possible.\n"
         "- Do NOT redesign, simplify, or semantically improve the chart unless required to fix the error.\n"
         "- Do NOT change plot type.\n"
-        '- Use ONLY the columns listed in selected_plot["features"].\n'
-        "- You may derive temporary helper columns ONLY from those listed features.\n"
+        '- Read source data ONLY from df columns listed in selected_plot["features"].\n'
+        "- You may compute and retain derived columns from those source features, including aggregates.\n"
         "- Save the plot with plt.savefig(); the path is available in a variable named "
         "`graph_file_path`. Use this variable but do not change it.\n\n"
         "Libraries:\n"
@@ -888,9 +894,8 @@ def graph_error_call(
         '  "title": string\n'
         "}\n\n"
         "Validation rules:\n"
-        "- `graph_df` must contain ONLY columns listed in `features_used`.\n"
-        "- `graph_df` must reflect EXACTLY what is plotted (no extra rows/cols).\n"
-        '- ALWAYS keep graph_data["features_expected"] equal to selected_plot["features"].\n'
+        + PLOT_DATAFRAME_INSTRUCTIONS
+        + '- ALWAYS keep graph_data["features_expected"] equal to selected_plot["features"].\n'
         "- Do NOT print anything.\n"
         "- Output ONLY MINIMAL executable Python code.\n"
         "- Return the COMPLETE corrected code, not a patch or explanation.\n\n"
