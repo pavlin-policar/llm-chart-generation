@@ -1,4 +1,4 @@
-"""Dataset indexing, stratified sampling, and durable annotation storage."""
+"""Dataset indexing, random sampling, and durable annotation storage."""
 from __future__ import annotations
 
 import errno
@@ -7,7 +7,7 @@ import json
 import os
 import random
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
@@ -176,23 +176,10 @@ def load_question(metadata: Path, entry: dict) -> tuple[dict, dict, str]:
     return record, question, hashlib.sha256(raw).hexdigest()
 
 
-def stratified_queue(entries: list[dict], completed: set[str], seed: int) -> list[dict]:
-    """Randomized blocks: one random remaining question per nonempty joint stratum."""
-    rng = random.Random(seed)
-    pools = defaultdict(list)
-    for entry in entries:
-        if entry["question_key"] not in completed:
-            pools[entry["stratum"]].append(entry)
-    for pool in pools.values():
-        rng.shuffle(pool)
-    queue = []
-    while pools:
-        strata = list(pools)
-        rng.shuffle(strata)
-        for stratum in strata:
-            queue.append(pools[stratum].pop())
-            if not pools[stratum]:
-                del pools[stratum]
+def random_queue(entries: list[dict], completed: set[str], seed: int) -> list[dict]:
+    """Uniformly shuffle all remaining questions, without replacement or stratification."""
+    queue = [entry for entry in entries if entry["question_key"] not in completed]
+    random.Random(seed).shuffle(queue)
     return queue
 
 

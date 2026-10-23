@@ -74,20 +74,21 @@ Metrics use only final saved responses for questions in the current dataset
 and annotator. **Yes** maps to valid and **No** to invalid. Human **Partly**,
 **Unsure**, and missing model judgments are excluded from binary metrics per
 axis; **Partly** is counted separately from **Unsure**. Undefined metrics display
-**N/A**. The reviewed sample is stratified,
-so these metrics do not estimate full-dataset performance without weighting.
+**N/A**. Metrics describe saved reviews, which may include earlier stratified
+samples; check their logged sampling strategies before estimating full-dataset performance.
 Final labels can be influenced by revealed model feedback; the section also
 reports how many reviews recorded a reveal before saving.
 
 ## Sampling and resuming
 
-Sampling is stratified by the **joint** model data/visual flags. Each shuffled
-block draws one random remaining question from each nonempty stratum, without
-replacement. This balances strata until smaller strata are exhausted; larger
-strata then continue until every question is labeled. Missing judgments form
-their own strata. Visual flags use `vlisual_valid`, then `visual_valid`, then
-legacy `valid`. A missing `data_valid` stays unknown and is never inferred
-from the visual flag.
+All remaining questions in the selected dataset are shuffled uniformly at
+random, without replacement or stratification. Every remaining question has
+the same chance of appearing next, regardless of the model's validity flags
+or which chart it belongs to. Questions from the same chart may appear consecutively.
+Model validity combinations are retained only for statistics and audit metadata;
+they do not affect the question order. Visual flags use `vlisual_valid`, then
+`visual_valid`, then legacy `valid`. A missing `data_valid` stays unknown and is
+never inferred from the visual flag.
 
 Enter a stable **Annotator ID** (different IDs for different people). Saved
 questions are skipped for that annotator and dataset, including after a server
@@ -133,8 +134,9 @@ Each line contains:
 The stable question key hashes the metadata path, graph ID, question index,
 and complete question object. Editing a question or its model judgments makes
 it eligible for a new review. Logs preserve the original snapshot for later
-joins and audits. Sampling intentionally overrepresents rare strata; use the
-logged populations when estimating dataset-wide agreement.
+joins and audits. New reviews log `uniform_random_without_replacement` as the
+sampling strategy. Earlier reviews retain their original sampling metadata;
+earlier stratified samples may overrepresent rare model validity combinations.
 
 Writes are locked across processes and flushed to disk before the next question
 appears. Malformed response rows block new submissions until repaired,

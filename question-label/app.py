@@ -14,7 +14,7 @@ from PIL import Image
 
 from labeling import (
     annotation_statistics, discover_datasets, flag_label, index_dataset, load_chart_image, load_question, read_responses,
-    response_path, save_response, selected_image, stratified_queue, validity_flags,
+    random_queue, response_path, save_response, selected_image, validity_flags,
 )
 
 
@@ -65,7 +65,7 @@ def render_statistics(panel, entries: list[dict], responses: list[dict], annotat
         st.markdown("**Confusion counts — human reference / model prediction**")
         st.dataframe([{key: value for key, value in row.items() if key == "Validity" or " / Model " in key}
                       for row in stats["dimensions"]], hide_index=True, width="stretch")
-        st.caption("For both checks, Yes counts as Valid and No as Invalid. Partly and Unsure human judgments and missing model flags are excluded from binary metrics per validity axis; Partly is counted separately. Exclusion reasons can overlap. Metrics describe the reviewed stratified sample, rather than an estimate for the full dataset. They use final labels, which may have been edited after seeing model feedback.")
+        st.caption("For both checks, Yes counts as Valid and No as Invalid. Partly and Unsure human judgments and missing model flags are excluded from binary metrics per validity axis; Partly is counted separately. Exclusion reasons can overlap. Metrics describe saved reviews, which may include earlier stratified samples. They use final labels, which may have been edited after seeing model feedback.")
         st.caption(f"Reviews marked as having model feedback displayed before saving: {stats['feedback_seen']}. Older records may not track this.")
         if not stats["reviewed"]:
             st.info("Save a review with Next question to populate agreement, precision, and recall.")
@@ -94,7 +94,7 @@ def main() -> None:
             cached_chart_image.clear()
             st.session_state.pop("context", None)
             st.rerun()
-        st.caption("Sampling uses shuffled blocks with one question per available combination of the model's data and visual flags. Questions do not repeat for this annotator.")
+        st.caption("Questions are sampled uniformly at random, without stratification. Questions do not repeat for this annotator.")
     if not dataset_name or not annotator:
         stats_panel.info("Select a dataset and enter an annotator ID to see its statistics.")
         st.info("Select a dataset and enter an annotator ID to begin.")
@@ -118,14 +118,14 @@ def main() -> None:
 
     completed = {row["question_key"] for row in responses}
     render_statistics(stats_panel, index["entries"], responses, annotator, dataset_name)
-    context = (str(metadata), stat.st_size, stat.st_mtime_ns, annotator, str(output), "save-on-next", "validated-images-v1", len(index["entries"]))
+    context = (str(metadata), stat.st_size, stat.st_mtime_ns, annotator, str(output), "save-on-next", "validated-images-v1", "uniform-random-v1", len(index["entries"]))
     if st.session_state.get("context") != context:
         seed = secrets.randbits(64)
         remaining_counts = Counter(entry["stratum"] for entry in index["entries"] if entry["question_key"] not in completed)
         st.session_state.context = context
         st.session_state.run = {
             "session_id": str(uuid4()), "seed": seed,
-            "queue": stratified_queue(index["entries"], completed, seed),
+            "queue": random_queue(index["entries"], completed, seed),
             "position": 0, "revealed": False, "presented_at": now(),
             "labels_before_reveal": None, "validity_displayed_at": None,
             "skipped_charts": set(),
@@ -275,7 +275,7 @@ def main() -> None:
                 "labels_changed_after_reveal": run["revealed"] and run["labels_before_reveal"] != {"data_valid": VALUES[data_choice], "visual_valid": VALUES[visual_choice]},
                 "human_labels": {"data_valid": VALUES[data_choice], "visual_valid": VALUES[visual_choice]},
                 "human_choices": {"data": data_choice, "visual": visual_choice}, "notes": notes,
-                "sampling": {"strategy": "shuffled_joint_stratum_blocks_without_replacement",
+                "sampling": {"strategy": "uniform_random_without_replacement",
                              "stratum": entry["stratum"], "seed": run["seed"], "draw_index": run["position"],
                              "stratum_population": dict(Counter(item["stratum"] for item in index["entries"])),
                              "stratum_remaining_at_start": run["stratum_remaining_at_start"]},
