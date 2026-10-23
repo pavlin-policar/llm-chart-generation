@@ -261,6 +261,7 @@ def invoke_structured_llm(
     final_llm=None,
     *,
     dataframe_name="df",
+    source_df=None,
 ):
     """Retry empty generations; format only non-empty output that fails validation."""
     config = {"metadata": call_metadata} if call_metadata else None
@@ -281,6 +282,7 @@ def invoke_structured_llm(
         if use_tools and df is not None:
             response, history = invoke_with_tools(
                 llm, messages, df, config=config, return_history=True, dataframe_name=dataframe_name,
+                source_df=source_df,
             )
             if response is None:
                 response = llm.invoke(history, config=config)
@@ -1101,10 +1103,17 @@ def graph_evaluation_call(
 
 
 PLOTTED_DATAFRAME_INSTRUCTIONS = (
-    "When tools are enabled, use `graph_df`; the supplied plotting "
-    "code's data transformations are already applied. Use its current columns and "
-    "aggregate values; do not repeat source preprocessing. The original source "
-    "dataframe is unavailable.\n"
+    "When tools are enabled, two read-only dataframes are available: `df` is the original "
+    "dataframe supplied to the plotting code; `graph_df` is the dataframe of columns used "
+    "for plotting, with the plotting code's data transformations already applied. "
+    "Prefer the existing columns and processed values in graph_df; do not apply source "
+    "preprocessing to graph_df again. If a needed column or quantity cannot be found in "
+    "graph_df, use the transformations in the supplied plotting code on a copy of df "
+    "to reconstruct it in a new variable. Follow the same filters, grouping, aggregation, "
+    "binning, normalization, units, and scaling as the code; unrelated raw-data statistics "
+    "are not evidence for a plotted quantity. Never modify or replace df or graph_df. "
+    "Plotting-code temporary variables are not supplied, and tool-call temporary variables "
+    "are not retained between calls; reconstruct what is needed within each call.\n"
 )
 
 
@@ -1120,6 +1129,8 @@ def describe_graph_png(
     use_tools=False,
     call_metadata=None,
     final_llm=None,
+    *,
+    df=None,
 ) -> str:  # Reasoning
     """
     Calls LLM -> given the image, code, structured metadata, data, dataset description and short plot description
@@ -1154,7 +1165,8 @@ def describe_graph_png(
         "- Return the full description with all six sections in the `description` field of a JSON object. A verification summary, completion confirmation, or reference to a description 'above' is not sufficient.\n"
         "- Use clear section headers exactly as provided below.\n"
         "- Be very detailed, but never invent values or categories.\n"
-        "- When describing numeric ranges, counts, or extrema, compute them from `graph_df` (not from the image).\n"
+        "- When describing numeric ranges, counts, or extrema, compute them from graph_df, "
+        "or reconstruct missing plotted quantities from df using the supplied plotting code.\n"
         "- When describing colors, line styles, marker shapes, layout, and visual structure, use the image.\n"
         "\n"
         "Write the description with these sections (use these headers verbatim):\n"
@@ -1183,11 +1195,12 @@ def describe_graph_png(
         "- For each plotted numeric column: min, max, mean, median, and (if relevant) quantiles.\n"
         "- For each plotted categorical column: number of categories, and the top categories by frequency. Use existing count columns when present.\n"
         "- If the chart is aggregated (e.g., bars of means/counts), describe the granularity and what each mark represents.\n"
-        "  Only state exact numbers if they can be computed from graph_df.\n"
+        "  Only state exact numbers if computed from graph_df or reconstructed from df using the plotting code.\n"
         "\n"
         "4) Patterns and relationships visible\n"
         "- Describe trends, clusters, outliers, group differences, correlations, or distributions.\n"
-        "- Do NOT claim a relationship if it cannot be supported by the image or graph_df.\n"
+        "- Do NOT claim a relationship if it cannot be supported by the image, graph_df, "
+        "or plotted quantities reconstructed from df using the plotting code.\n"
         "\n"
         "5) Image/visual properties (from the image)\n"
         "- Describe layout: orientation, gridlines, axes, tick density, legend placement, title presence.\n"
@@ -1226,7 +1239,7 @@ def describe_graph_png(
         graph_df,
         use_tools,
         call_metadata,
-        enforce_schema_at_api=False, dataframe_name="graph_df",
+        enforce_schema_at_api=False, dataframe_name="graph_df", source_df=df,
         final_llm=final_llm,
     )
     return response.description
@@ -1323,8 +1336,9 @@ QUESTION_EVIDENCE_INSTRUCTIONS = (
 QUESTION_TOOL_VERIFICATION_INSTRUCTIONS = (
     "MANDATORY TOOL VERIFICATION:\n"
     "- Before final output, validate EVERY data-dependent question, explanation, and answer with run_pandas "
-    "computations on graph_df. Batch checks are allowed; label results by question number.\n"
-    "- The supplied graph_df is read-only. Never replace, shadow, or modify it, or "
+    "computations on graph_df, or on quantities reconstructed from df using the supplied "
+    "plotting code when they are missing from graph_df. Batch checks are allowed; label results by question number.\n"
+    "- The supplied df and graph_df are read-only. Never replace, shadow, or modify either, or "
     "reconstruct input data from typed values. Use a new variable for derived "
     "data and compute evidence from the supplied rows.\n"
     "- Verify against the existing processed values, respecting units and axis scaling. Check all "
@@ -1403,6 +1417,7 @@ def generate_graph_questions(
     *,
     sanitized_dataset_desc,
     plot_code,
+    df=None,
 ) -> list[dict]:  # Reasoning
     """Generate visually answerable QA with rich context for answer verification."""
 
@@ -1467,7 +1482,7 @@ def generate_graph_questions(
                 graph_df,
                 use_tools,
                 metadata,
-                enforce_schema_at_api=False, dataframe_name="graph_df",
+                enforce_schema_at_api=False, dataframe_name="graph_df", source_df=df,
                 final_llm=final_llm,
             )
         except Exception as error:
@@ -1498,6 +1513,7 @@ def correct_graph_questions(
     final_llm=None,
     *,
     sanitized_dataset_desc,
+    df=None,
 ) -> list[dict]:
     """Correct all rejected batch candidates together using both judges' feedback."""
     if not rejected_questions:
@@ -1544,7 +1560,7 @@ def correct_graph_questions(
     ])
     response = invoke_structured_llm(
         llm, [message], GraphQuestions, graph_df, use_tools, call_metadata,
-        enforce_schema_at_api=False, dataframe_name="graph_df", final_llm=final_llm,
+        enforce_schema_at_api=False, dataframe_name="graph_df", source_df=df, final_llm=final_llm,
     )
     if len(response.questions) != len(rejected_questions):
         raise ValueError("Question correction count does not match rejected questions")
@@ -1567,6 +1583,7 @@ def generate_graph_question_one(
     sanitized_dataset_desc,
     plot_code,
     difficulty,
+    df=None,
 ) -> dict:
     """Generate one chart question using all previous questions as context."""
 
@@ -1641,6 +1658,7 @@ def generate_graph_question_one(
         use_tools,
         call_metadata,
         enforce_schema_at_api=False, dataframe_name="graph_df",
+        source_df=df,
         final_llm=final_llm,
     )
     return response.model_dump()
@@ -1762,7 +1780,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
 
 
 @retry_call
-def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None, *, return_reasons=False):
+def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, call_metadata=None, final_llm=None, *, return_reasons=False, df=None):
     """Check data-dependent question-answer claims using the plotted dataframe."""
     if graph_df is None:
         raise ValueError("Question data validation requires the plotted dataframe")
@@ -1770,7 +1788,8 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         "Validate every QUESTION, its EXPLANATION (when supplied), and final ANSWER "
         "in order against the plotted data. "
         + PLOTTED_DATAFRAME_INSTRUCTIONS
-        + "Use run_pandas on graph_df to verify EVERY "
+        + "Use run_pandas on graph_df, or reconstruct missing quantities from df using the "
+        "supplied plotting code, to verify EVERY "
         "data-dependent premise and claim in the question, explanation, and answer. "
         "A correct final answer does not excuse an incorrect, unsupported, or "
         "contradictory explanation; set data_valid=false if any data-dependent "
@@ -1779,7 +1798,7 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         "Check comparisons and denominators; 'most' means more than half. Allow stated approximations.\n"
         "Retrieving values does not verify a comparison or conclusion. "
         "Compute the asserted relationship and check whether it supports the exact claim.\n"
-        "The supplied graph_df is read-only. Never replace, shadow, or modify it, or "
+        "The supplied df and graph_df are read-only. Never replace, shadow, or modify either, or "
         "reconstruct input data from typed values. Use a new variable for derived "
         "data and compute evidence from the supplied rows.\n"
         "In every run_pandas call, assign computed evidence to the Python variable `result`. "
@@ -1789,7 +1808,8 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         "Verify every data-dependent premise and every claim in each explanation and answer "
         "independently; sharing a computation does not replace checking each claim. "
         "Make additional calls when evidence is missing or computations fail. "
-        "Only status='ok' computations on graph_df count as evidence; hardcoded answers or "
+        "Only status='ok' computations on graph_df or quantities reconstructed from df using "
+        "the supplied plotting code count as evidence; hardcoded answers or "
         "verification strings do not. Correct tool errors and retry.\n"
         "Set data_valid=false for incorrect, unsupported, or unverified data-dependent claims. "
         "Set data_valid=true only when all such claims are supported, or when the pair contains "
@@ -1823,6 +1843,7 @@ def judge_graph_question_data(llm, questions, graph_df, graph_data, plot_code, c
         use_tools=True,
         call_metadata=call_metadata,
         enforce_schema_at_api=False, dataframe_name="graph_df",
+        source_df=df,
         final_llm=final_llm,
     )
     if len(response.judgments) != len(questions):

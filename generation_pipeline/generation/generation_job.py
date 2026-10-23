@@ -700,6 +700,7 @@ def verify_batched_questions(
     questions, llm, png_path, dataset_sem, graph_data, graph_df,
     plot_code, stages, final_llm, *, correction_round=0,
     batch_size=QUESTION_REVIEW_BATCH_SIZE,
+    df=None,
 ):
     """Verify candidates once in configurable batches and retain their judgments."""
     global CURRENT_STAGE
@@ -739,6 +740,7 @@ def verify_batched_questions(
             llm, batch, graph_df, graph_data, plot_code,
             call_metadata={"stage_name": CURRENT_STAGE, **metadata},
             final_llm=final_llm, return_reasons=True,
+            df=df,
         )
         for question, judgment in zip(batch, judgments):
             question["data_valid"] = judgment["data_valid"]
@@ -754,7 +756,7 @@ def verify_batched_questions(
 
 def verify_and_correct_batched_questions(
     questions, llm, png_path, dataset_sem, description, graph_data, graph_df,
-    plot_code, stages, final_llm,
+    plot_code, stages, final_llm, *, df=None,
 ):
     """Validate, correct all failures in one batch, then validate corrections once."""
     global CURRENT_STAGE
@@ -764,6 +766,7 @@ def verify_and_correct_batched_questions(
     verify_batched_questions(
         questions, llm, png_path, dataset_sem, graph_data, graph_df,
         plot_code, stages, final_llm,
+        df=df,
     )
     rejected = [(index, question) for index, question in enumerate(questions)
                 if question.get("vlisual_valid") is False or question.get("data_valid") is False]
@@ -789,6 +792,7 @@ def verify_and_correct_batched_questions(
             call_metadata={"stage_name": CURRENT_STAGE, "question_correction_round": 1},
             final_llm=final_llm,
             sanitized_dataset_desc=dataset_sem["sanitized_description"],
+            df=df,
         )
     except Exception as error:
         log_error(CURRENT_STAGE, error)
@@ -815,6 +819,7 @@ def verify_and_correct_batched_questions(
     verify_batched_questions(
         corrected, llm, png_path, dataset_sem, graph_data, graph_df,
         plot_code, stages, final_llm, correction_round=1,
+        df=df,
     )
     rejected_count = sum(
         question.get("vlisual_valid") is False or question.get("data_valid") is False
@@ -1001,6 +1006,7 @@ def generate_graph(
             use_tools=stage_uses_tools(stages, "description"),
             call_metadata={"stage_name": "description"},
             final_llm=llm,
+            df=df,
         )
 
         CURRENT_STAGE = "questions"
@@ -1033,6 +1039,7 @@ def generate_graph(
                     plot_code=code,
                     difficulty=difficulty,
                     graph_df=graph_df,
+                    df=df,
                     use_tools=stage_uses_tools(stages, "questions"),
                     call_metadata={"stage_name": "questions"},
                     final_llm=llm,
@@ -1058,6 +1065,7 @@ def generate_graph(
                     code,
                     call_metadata={"stage_name": "question_data_judge"},
                     final_llm=llm,
+                    df=df,
                 )[0]
 
                 # Keep every candidate for review, but only count passing pairs.
@@ -1077,6 +1085,7 @@ def generate_graph(
                 sanitized_dataset_desc=dataset_sem["sanitized_description"],
                 plot_code=code,
                 graph_df=graph_df,
+                df=df,
                 use_tools=stage_uses_tools(stages, "questions"),
                 call_metadata={"stage_name": "questions"},
                 final_llm=llm,
@@ -1091,6 +1100,7 @@ def generate_graph(
             verify_and_correct_batched_questions(
                 questions, questions_llm, final_img_path, dataset_sem, description,
                 graph_data, graph_df, code, stages, llm,
+                df=df,
             )
 
         CURRENT_STAGE = "question_labeling"

@@ -1,4 +1,5 @@
 import ast
+import copy
 import json
 import os
 import re
@@ -100,7 +101,7 @@ FORBIDDEN_NODES = (
 
 class PandasCodeValidator(ast.NodeVisitor):
     def __init__(self, dataframe_name="df"):
-        self.dataframe_name = dataframe_name
+        self.dataframe_names = {dataframe_name} if isinstance(dataframe_name, str) else set(dataframe_name)
 
     def visit(self, node):
         if isinstance(node, FORBIDDEN_NODES):
@@ -126,16 +127,16 @@ class PandasCodeValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_arg(self, node):
-        if node.arg == self.dataframe_name:
-            raise ValueError(f"The supplied {self.dataframe_name} is read-only; do not replace or shadow it")
+        if node.arg in self.dataframe_names:
+            raise ValueError(f"The supplied {node.arg} is read-only; do not replace or shadow it")
         self.generic_visit(node)
 
     def _check_dataframe_write(self, node):
         root = node
         while isinstance(root, (ast.Attribute, ast.Subscript)):
             root = root.value
-        if isinstance(root, ast.Name) and root.id == self.dataframe_name and isinstance(node.ctx, ast.Store):
-            raise ValueError(f"The supplied {self.dataframe_name} is read-only; use a new variable for derived data")
+        if isinstance(root, ast.Name) and root.id in self.dataframe_names and isinstance(node.ctx, ast.Store):
+            raise ValueError(f"The supplied {root.id} is read-only; use a new variable for derived data")
 
     def visit_Call(self, node):
         if isinstance(node.func, ast.Name) and node.func.id == "print":
@@ -213,7 +214,13 @@ def _error_outcome(error, error_code):
     }
 
 
-def create_dataframe_tools(df, *, dataframe_name="df"):
+def create_dataframe_tools(df, *, dataframe_name="df", source_df=None):
+    dataframes = {dataframe_name: df}
+    if source_df is not None:
+        if dataframe_name == "df":
+            raise ValueError("The plotted dataframe must have a distinct name when source_df is supplied")
+        dataframes["df"] = source_df
+
     @tool
     def run_pandas(code: str) -> str:
         """Run general read-only pandas code on `df`.
@@ -240,35 +247,55 @@ def create_dataframe_tools(df, *, dataframe_name="df"):
         """
 
         try:
-            tree = _validate_pandas_code(code, dataframe_name)
+            tree = _validate_pandas_code(code, dataframes)
         except Exception as error:
             return json.dumps(_error_outcome(error, "invalid_code"), ensure_ascii=False)
 
         try:
-            working_df = df.copy(deep=True)
-            # Index backing arrays can otherwise be shared with the original.
-            working_df.index = df.index.copy(deep=True)
-            working_df.columns = df.columns.copy(deep=True)
+            working_dataframes = {}
+            for name, original in dataframes.items():
+                working = original.copy(deep=True)
+                # Pandas deep copies still share mutable objects stored in cells.
+                for position, dtype in enumerate(original.dtypes):
+                    if dtype == object:
+                        working.isetitem(
+                            position, original.iloc[:, position].map(copy.deepcopy).astype(object),
+                        )
+                # Index backing arrays can otherwise be shared with the original.
+                working.index = original.index.copy(deep=True)
+                working.columns = original.columns.copy(deep=True)
+                working_dataframes[name] = working
             namespace = {
                 "__builtins__": SAFE_BUILTINS,
-                dataframe_name: working_df,
+                **working_dataframes,
                 "np": np,
                 "pd": pd,
             }
             exec(compile(tree, "<pandas-tool>", "exec"), namespace, namespace)
-            if (
-                namespace[dataframe_name] is not working_df
-                or not working_df.equals(df)
-                or working_df.index.names != df.index.names
-                or working_df.columns.names != df.columns.names
-            ):
-                raise ValueError(f"The supplied {dataframe_name} was replaced or modified; use a copy in a new variable")
+            for name, original in dataframes.items():
+                working = working_dataframes[name]
+                if (
+                    namespace[name] is not working
+                    or not working.equals(original)
+                    or working.index.names != original.index.names
+                    or working.columns.names != original.columns.names
+                ):
+                    raise ValueError(f"The supplied {name} was replaced or modified; use a copy in a new variable")
             result = json.loads(_serialize_result(namespace["result"]))
             return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
         except Exception as error:
             return json.dumps(_error_outcome(error, "execution_error"), ensure_ascii=False)
 
     run_pandas.description = re.sub(r"\bdf\b", dataframe_name, run_pandas.description)
+    if source_df is not None:
+        run_pandas.description += (
+            "\nBoth dataframes are available and read-only: `df` is the original dataframe; "
+            "`graph_df` is the dataframe of columns used for plotting, with plotting transformations "
+            "already applied. Prefer graph_df. If a required quantity is missing from graph_df, "
+            "apply the transformations in the supplied plotting code to a copy of df, using a new "
+            "variable, to reconstruct the plotted quantity. Temporary variables are not retained "
+            "between tool calls."
+        )
     return [run_pandas]
 
 
@@ -309,10 +336,10 @@ def create_code_execution_tool(df, selected_plot):
     return execute_plot_code
 
 
-def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return_history=False, *, dataframe_name="df"):
+def invoke_with_tools(llm, messages, df, config=None, selected_plot=None, return_history=False, *, dataframe_name="df", source_df=None):
     """Invoke an LLM and execute any requested dataframe analysis."""
 
-    tools = create_dataframe_tools(df, dataframe_name=dataframe_name)
+    tools = create_dataframe_tools(df, dataframe_name=dataframe_name, source_df=source_df)
     if selected_plot is not None:
         tools.append(create_code_execution_tool(df, selected_plot))
     tools_by_name = {dataframe_tool.name: dataframe_tool for dataframe_tool in tools}
