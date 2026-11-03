@@ -20,6 +20,8 @@ The workflow is centered around transforming tabular data into structured visual
   - Supports local dataset overrides and paper-friendly figure sizing.
 - `join_metadata.py`
   - Combines multiple `metadataN.jsonl` files into a single `metadata.jsonl` file.
+- `fix_visual_validity.py`
+  - Changes existing false visual-validity flags to true when `visual_reason` contains the whole word `explanation` (case-insensitive). Supports `vlisual_valid`, `visual_valid`, and legacy `valid`; leaves data validity, reasons, and all other fields unchanged. This is a keyword override, not model revalidation. Streams large files and writes a separate output file; existing files cannot be overwritten.
 - `rewrite_dataset.py`
   - Utility script for correcting image path prefixes inside dataset metadata files.
 - `add_question_types.py`
@@ -88,6 +90,10 @@ The evaluation scripts will expect
 
 - Re-render metadata charts:
   - `python generation_pipeline/render_chart_from_metadata.py --graph-id <UUID> --output paper/figures/example_chart.png`
+
+- Preview visual-validity overrides, then write a new metadata file:
+  - `python generation_pipeline/fix_visual_validity.py --input dataset/main_dataset/metadata.jsonl --dry-run`
+  - `python generation_pipeline/fix_visual_validity.py --input dataset/main_dataset/metadata.jsonl --output dataset/main_dataset/metadata_fixed.jsonl`
 
 - Repair dataset metadata image paths:
   - `python generation_pipeline/rewrite_dataset.py`

@@ -183,6 +183,25 @@ def random_queue(entries: list[dict], completed: set[str], seed: int) -> list[di
     return queue
 
 
+def next_question_position(
+    queue: list[dict], position: int, completed: set[str], skipped_charts: set[int],
+    *, same_graph: bool = False,
+) -> int | None:
+    """Find the next eligible question in the shuffled queue, optionally on this chart.
+
+    Use the metadata row offset to identify a chart even when graph IDs are
+    missing or reused. Consumed questions stay behind the current position.
+    """
+    current_offset = queue[position]["offset"]
+    for candidate_position in range(position + 1, len(queue)):
+        candidate = queue[candidate_position]
+        if candidate["question_key"] in completed or candidate["offset"] in skipped_charts:
+            continue
+        if not same_graph or candidate["offset"] == current_offset:
+            return candidate_position
+    return None
+
+
 def response_path(output_dir: Path, dataset_dir: Path, annotator: str) -> Path:
     identity = digest([str(dataset_dir.resolve()), annotator])[:20]
     return output_dir / f"labels-{identity}.jsonl"

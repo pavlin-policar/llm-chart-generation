@@ -10,6 +10,13 @@ the model judgment to read its reason. Your selections and notes remain editable
 when selecting labels or revealing model judgments. You may also save with
 **Next question** without revealing the model judgments.
 
+**Skip question** moves to the next question in the random queue without saving.
+**Different question from same graph** skips the current question and brings
+another remaining question from that chart forward. Both buttons work before
+selecting labels and reset the choices, notes, and model reveal for the new
+question. They are disabled when no eligible alternative remains. Skips apply
+only to the current session; reload the app to review skipped questions again.
+
 From the repository root, install and run:
 
 ```powershell
@@ -85,6 +92,11 @@ All remaining questions in the selected dataset are shuffled uniformly at
 random, without replacement or stratification. Every remaining question has
 the same chance of appearing next, regardless of the model's validity flags
 or which chart it belongs to. Questions from the same chart may appear consecutively.
+Using **Different question from same graph** instead selects the first remaining
+question for that chart in the shuffled queue, uniformly among its remaining
+questions. Other queued questions retain their relative order. Saved questions
+and charts skipped for unreadable images are excluded from both navigation
+actions. Skipped questions do not count toward review coverage.
 Model validity combinations are retained only for statistics and audit metadata;
 they do not affect the question order. Visual flags use `vlisual_valid`, then
 `visual_valid`, then legacy `valid`. A missing `data_valid` stays unknown and is
@@ -135,7 +147,12 @@ The stable question key hashes the metadata path, graph ID, question index,
 and complete question object. Editing a question or its model judgments makes
 it eligible for a new review. Logs preserve the original snapshot for later
 joins and audits. New reviews log `uniform_random_without_replacement` as the
-sampling strategy. Earlier reviews retain their original sampling metadata;
+sampling strategy for normal queue navigation. Questions selected with
+**Different question from same graph** instead log
+`uniform_random_same_graph_without_replacement`. Logs also record the selection
+action and count of questions skipped in the session; manually selected or
+skipped reviews can affect the representativeness of the saved sample.
+Earlier reviews retain their original sampling metadata;
 earlier stratified samples may overrepresent rare model validity combinations.
 
 Writes are locked across processes and flushed to disk before the next question

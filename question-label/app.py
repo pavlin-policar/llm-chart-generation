@@ -14,7 +14,7 @@ from PIL import Image
 
 from labeling import (
     annotation_statistics, discover_datasets, flag_label, index_dataset, load_chart_image, load_question, read_responses,
-    random_queue, response_path, save_response, selected_image, validity_flags,
+    next_question_position, random_queue, response_path, save_response, selected_image, validity_flags,
 )
 
 
@@ -37,6 +37,22 @@ def cached_chart_image(path: str, size: int, modified_ns: int) -> Image.Image:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def advance_question(run: dict, *, target: int | None = None, action: str = "next") -> None:
+    """Advance without dropping intervening questions when staying on a chart."""
+    position = run["position"]
+    if action in ("skip_question", "same_graph"):
+        run.setdefault("skipped_questions", set()).add(run["queue"][position]["question_key"])
+    if target is not None and target != position + 1:
+        run["queue"].insert(position + 1, run["queue"].pop(target))
+    run.update(
+        position=position + 1, revealed=False, labels_before_reveal=None,
+        validity_displayed_at=None, presented_at=now(), started=time.monotonic(),
+        selection_action=action,
+        sampling_strategy=("uniform_random_same_graph_without_replacement" if action == "same_graph"
+                           else "uniform_random_without_replacement"),
+    )
 
 
 def render_statistics(panel, entries: list[dict], responses: list[dict], annotator: str, dataset_name: str) -> None:
@@ -94,7 +110,7 @@ def main() -> None:
             cached_chart_image.clear()
             st.session_state.pop("context", None)
             st.rerun()
-        st.caption("Questions are sampled uniformly at random, without stratification. Questions do not repeat for this annotator.")
+        st.caption("Questions start in random order. Skip a question or choose another from the same graph without saving. Saved reviews do not repeat for this annotator.")
     if not dataset_name or not annotator:
         stats_panel.info("Select a dataset and enter an annotator ID to see its statistics.")
         st.info("Select a dataset and enter an annotator ID to begin.")
@@ -128,7 +144,8 @@ def main() -> None:
             "queue": random_queue(index["entries"], completed, seed),
             "position": 0, "revealed": False, "presented_at": now(),
             "labels_before_reveal": None, "validity_displayed_at": None,
-            "skipped_charts": set(),
+            "skipped_charts": set(), "skipped_questions": set(),
+            "selection_action": "initial", "sampling_strategy": "uniform_random_without_replacement",
             "started": time.monotonic(),
             "stratum_remaining_at_start": dict(remaining_counts),
         }
@@ -140,13 +157,16 @@ def main() -> None:
     ):
         run["position"] += 1
         run.update(presented_at=now(), started=time.monotonic(), revealed=False,
-                   labels_before_reveal=None, validity_displayed_at=None)
+                   labels_before_reveal=None, validity_displayed_at=None,
+                   selection_action="queue", sampling_strategy="uniform_random_without_replacement")
     total = len(index["entries"])
     completed_count = sum(entry["question_key"] in completed for entry in index["entries"])
     with st.sidebar:
         st.metric("Labeled in this dataset", f"{completed_count} / {total}")
         if run.get("skipped_charts"):
             st.caption(f"Unreadable charts skipped this session: {len(run['skipped_charts'])}. Skips are not labels.")
+        if run.get("skipped_questions"):
+            st.caption(f"Questions skipped this session: {len(run['skipped_questions'])}. Skips are not labels.")
         st.caption(f"Responses: {output}")
         if responses:
             st.download_button("Download responses (JSONL)", output.read_bytes(), file_name=f"{dataset_name}-labels.jsonl", mime="application/x-ndjson")
@@ -156,6 +176,8 @@ def main() -> None:
     if run["position"] >= len(run["queue"]):
         if run.get("skipped_charts"):
             st.info("No questions remain in this session. Some charts were skipped because their images could not be read. Restore the images and reload the app to review them.")
+        elif run.get("skipped_questions"):
+            st.info("No questions remain in this session. Some questions were skipped without saving labels. Reload the app to review them again.")
         elif total:
             st.success("All available questions in this dataset have been labeled by this annotator.")
         else:
@@ -184,8 +206,7 @@ def main() -> None:
             st.rerun()
         if skip.button("Skip chart"):
             run.setdefault("skipped_charts", set()).add(entry["offset"])
-            run.update(position=run["position"] + 1, revealed=False, labels_before_reveal=None,
-                       validity_displayed_at=None, presented_at=now(), started=time.monotonic())
+            advance_question(run, action="skip_chart")
             st.rerun()
         return
 
@@ -209,6 +230,28 @@ def main() -> None:
                 st.write(dataset["sanitized_description"])
         else:
             st.caption("No sanitized dataset context is available; judge visual validity using the chart and question.")
+
+        random_target = next_question_position(
+            run["queue"], run["position"], completed, run.get("skipped_charts", set()),
+        )
+        graph_target = next_question_position(
+            run["queue"], run["position"], completed, run.get("skipped_charts", set()), same_graph=True,
+        )
+        skip_question, same_graph = st.columns(2)
+        if skip_question.button(
+            "Skip question", disabled=random_target is None,
+            help=("Skip without saving and show the next random question. Skipped questions return after reloading."
+                  if random_target is not None else "No other unreviewed questions remain in this session."),
+        ):
+            advance_question(run, target=random_target, action="skip_question")
+            st.rerun()
+        if same_graph.button(
+            "Different question from same graph", disabled=graph_target is None,
+            help=("Skip without saving and show another random question from this chart."
+                  if graph_target is not None else "No other unreviewed questions from this chart remain in this session."),
+        ):
+            advance_question(run, target=graph_target, action="same_graph")
+            st.rerun()
 
         with st.expander("Labeling guidelines"):
             st.markdown(
@@ -275,7 +318,9 @@ def main() -> None:
                 "labels_changed_after_reveal": run["revealed"] and run["labels_before_reveal"] != {"data_valid": VALUES[data_choice], "visual_valid": VALUES[visual_choice]},
                 "human_labels": {"data_valid": VALUES[data_choice], "visual_valid": VALUES[visual_choice]},
                 "human_choices": {"data": data_choice, "visual": visual_choice}, "notes": notes,
-                "sampling": {"strategy": "uniform_random_without_replacement",
+                "sampling": {"strategy": run.get("sampling_strategy", "uniform_random_without_replacement"),
+                             "selection_action": run.get("selection_action", "initial"),
+                             "skipped_questions_in_session": len(run.get("skipped_questions", set())),
                              "stratum": entry["stratum"], "seed": run["seed"], "draw_index": run["position"],
                              "stratum_population": dict(Counter(item["stratum"] for item in index["entries"])),
                              "stratum_remaining_at_start": run["stratum_remaining_at_start"]},
@@ -285,8 +330,7 @@ def main() -> None:
             except (OSError, ValueError, TimeoutError) as error:
                 st.error(f"Labels were not saved. Stay on this question and retry Next question: {error}")
             else:
-                run.update(position=run["position"] + 1, revealed=False, labels_before_reveal=None,
-                           validity_displayed_at=None, presented_at=now(), started=time.monotonic())
+                advance_question(run)
                 st.rerun()
 
 
