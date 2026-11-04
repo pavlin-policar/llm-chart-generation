@@ -1722,6 +1722,8 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "and context explicitly supplied in the question. "
         "'Why does this treatment reduce pulse?' is invalid when it requires "
         "an unstated causal or biological explanation.\n"
+        "APPROXIMATE READABILITY IS SUFFICIENT for values in both the answer and explanation. "
+        "Do not reject a value merely because only its approximation is readable from the chart.\n"
         "For numeric questions, use the precision the chart supports. Mark valid when "
         "the correct mark, series, or category is identifiable and the proposed value "
         "is consistent with a reasonable visual estimate from the axis, ticks, labels, "
