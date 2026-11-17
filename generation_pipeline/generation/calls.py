@@ -1666,13 +1666,12 @@ def generate_graph_question_one(
 
 @retry_call
 def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=None, final_llm=None, *, return_reasons=False):
-    """Check question-answer grounding using only the visible chart and domain context."""
+    """Check question-answer grounding without generated explanations."""
     prompt = (
-        "Judge each QUESTION, its EXPLANATION (when supplied), and final ANSWER in order. "
-        "Check every explanation claim as well as the answer; a correct final "
-        "answer does not excuse an incorrect, unsupported, or contradictory "
-        "explanation. Apply the numeric tolerance rules below to explanation values "
-        "as well as the answer. Set vlisual_valid to false if either fails these checks. "
+        "Judge each QUESTION and proposed ANSWER in order. "
+        "Check every question premise and answer claim. "
+        "Set vlisual_valid to false if the question or answer fails these checks. "
+        "Treat the proposed answer as a claim to verify, not as evidence. "
         "Use ONLY the chart image, "
         "SANITIZED DATASET DESCRIPTION, and context explicitly supplied in the question; no rich descriptions, plotting code, "
         "hidden data, or outside specialist or empirical knowledge. The ordinary "
@@ -1720,22 +1719,18 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
         "and context explicitly supplied in the question. "
         "'Why does this treatment reduce pulse?' is invalid when it requires "
         "an unstated causal or biological explanation.\n"
-        "APPROXIMATE READABILITY IS SUFFICIENT for values in both the answer and explanation. "
+        "APPROXIMATE READABILITY IS SUFFICIENT for values in the answer. "
         "Do not reject a value merely because only its approximation is readable from the chart.\n"
         "For numeric questions, use the precision the chart supports. Mark valid when "
         "the correct mark, series, or category is identifiable and the proposed value "
         "is consistent with a reasonable visual estimate from the axis, ticks, labels, "
-        "or marks. Extra decimal places in the proposed answer or explanation do not make it invalid "
+        "or marks. Extra decimal places in the proposed answer do not make it invalid "
         "if its rounded or approximate value is readable from the image. Allow a "
         "reasonable visual tolerance based on tick spacing and image resolution.\n"
-        "Ignore additional numeric detail in the explanation when the requested "
-        "answer and supporting reasoning are roughly determinable from the chart. "
-        "Do not reject solely because the explanation supplies extra values or "
-        "precise intermediate values that are not individually readable from the image. "
-        "For example, an explanation using 9.543 and 4.812 to justify a difference "
-        "of about 4.7 is acceptable when the chart supports values of about 9.5 "
-        "and 4.8. These extra values must not contradict the visible evidence or "
-        "supply a necessary hidden premise: reject if the result depends on "
+        "For derived numeric answers, check that the required quantities are "
+        "approximately readable and support the calculation. For example, "
+        "a difference of about 4.7 is acceptable when the chart supports values "
+        "of about 9.5 and 4.8. Reject if the result depends on "
         "unseen quantities or precision the chart cannot support.\n"
         "An exact reference answer may have been verified from hidden plotting "
         "data; judge whether its approximate value is visually recoverable, not "
@@ -1767,7 +1762,7 @@ def judge_graph_questions(llm, png_path, dataset_desc, questions, call_metadata=
     with open(png_path, "rb") as file:
         png_b64 = base64.b64encode(file.read()).decode("utf-8")
 
-    pairs = [{"question": q["question"], "explanation": q.get("explanation", ""), "answer": q["answer"]} for q in questions]
+    pairs = [{"question": q["question"], "answer": q["answer"]} for q in questions]
     message = HumanMessage(content=[
         {"type": "text", "text": prompt},
         {"type": "text", "text": f"SANITIZED DATASET DESCRIPTION:\n{dataset_desc}"},
