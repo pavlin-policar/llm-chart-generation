@@ -65,3 +65,18 @@ validity. Samples across model validity combinations, reveals model judgments
 on request, and saves final labels when advancing. Includes per-dataset agreement,
 precision, and recall statistics and resumable JSONL annotations with question,
 graph, image, and sampling provenance. See [question-label/README.md](question-label/README.md).
+
+Before starting, ensure that you have created a symlink to the dataset folder in the top-level folder. For FRIDA, the command is
+```bash
+ln -s /shared/workspace/biolab/andraz/main_dataset dataset
+```
+
+If you haven't alraedy, create an environment and install the required dependencies using the following command:
+```
+TODO
+```
+
+and run the application using:
+```
+TODO
+```
