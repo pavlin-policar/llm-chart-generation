@@ -73,10 +73,6 @@ ln -s /shared/workspace/biolab/andraz/main_dataset dataset
 
 If you haven't alraedy, create an environment and install the required dependencies using the following command:
 ```
-TODO
+uv run --python=3.14 --with-requirements question-label/requirements.txt streamlit run question-label/app.py
 ```
 
-and run the application using:
-```
-TODO
-```
