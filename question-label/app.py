@@ -310,6 +310,12 @@ def main() -> None:
                 "If the question contains no factual values to check, answer **Yes** to question 6. Judge the answer and explanation together in question 5. Use **Unsure** when evidence is insufficient. Hover over each question's help icon for detailed guidance and examples."
             )
         widget_key = f"{run['session_id']}:{entry['question_key']}"
+        if st.button(
+            "All okay", key=f"{widget_key}:all_okay",
+            help="Set all seven answers to passing values, including a chart design rating of 5. You can edit them before saving with Next question.",
+        ):
+            for item in REVIEW_QUESTIONS:
+                st.session_state[f"{widget_key}:{item['key']}"] = item.get("passing_choice", 5)
         choices = {}
         review_tabs = st.tabs([f"Q{number}" for number in range(1, len(REVIEW_QUESTIONS) + 1)])
         for tab, item in zip(review_tabs, REVIEW_QUESTIONS):

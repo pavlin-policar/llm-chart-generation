@@ -5,6 +5,9 @@ validators. Select a generation dataset, review the chart, question, proposed
 answer and explanation, optionally add notes, and answer all seven review questions.
 Use the **Q1–Q7** tabs to choose a review question without scrolling through the
 whole form. Choices persist across tabs; the counter lists any unanswered questions.
+Use **All okay** to fill all seven answers with passing values (including a chart
+design rating of **5**), making both human validity flags valid. You can adjust
+individual answers afterward; **Next question** still saves the response.
 The derived human flags appear beside the model flags as soon as every question
 is answered, and update when you edit a choice.
 Click **Display validity** to reveal the model's flags and reasons after
